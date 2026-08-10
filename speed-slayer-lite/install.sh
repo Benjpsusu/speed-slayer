@@ -4,6 +4,7 @@ umask 077
 
 readonly APP="speed-slayer-lite"
 readonly APP_DIR="/etc/${APP}"
+readonly SCRIPT_URL="https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh"
 readonly XRAY_VERSION="26.3.27"
 readonly CLOUDFLARED_VERSION="2026.7.3"
 
@@ -75,6 +76,16 @@ install_binaries() {
   install -m 0755 "$tmp/cloudflared" /usr/local/bin/cloudflared
   rm -rf -- "$tmp"
   trap - RETURN
+}
+
+install_self() {
+  if [[ -f ${BASH_SOURCE[0]:-$0} ]]; then
+    install -m 0700 "${BASH_SOURCE[0]:-$0}" "$APP_DIR/install.sh"
+  else
+    curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+      "$SCRIPT_URL" -o "$APP_DIR/install.sh"
+    chmod 0700 "$APP_DIR/install.sh"
+  fi
 }
 
 create_users() {
@@ -254,6 +265,17 @@ quick_domain_since() {
     grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' | tail -n1 | sed 's#https://##'
 }
 
+wait_for_quick_domain() {
+  local attempt=1 domain
+  while (( attempt <= 15 )); do
+    domain=$(quick_domain)
+    [[ -n $domain ]] && return 0
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 write_client_info() {
   [[ -r $APP_DIR/state ]] || die "尚未安装"
   # State is generated internally and root-only; validate every field before use.
@@ -331,12 +353,14 @@ do_install() {
   write_config
   /usr/local/bin/xray run -test -config "$APP_DIR/xray.json"
   write_units
+  install_self
   ln -sf "$APP_DIR/install.sh" /usr/local/sbin/$APP
-  install -m 0700 "$0" "$APP_DIR/install.sh"
   systemctl daemon-reload
   systemctl enable --now xray-lite.service cloudflared-lite.service
-  sleep 3
   systemctl is-active --quiet xray-lite.service || die "Xray 启动失败，请运行 journalctl -u xray-lite"
+  if [[ $ARGO_MODE == quick ]] && ! wait_for_quick_domain; then
+    log "警告：尚未读取到 Quick Tunnel 域名，可稍后运行 speed-slayer-lite show"
+  fi
   write_client_info
   cat "$APP_DIR/client-info.txt"
   log "完成。公网防火墙需开放 $SS_PORT/tcp+udp 和 $REALITY_PORT/tcp；不要开放 $VMESS_PORT。"

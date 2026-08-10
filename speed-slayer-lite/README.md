@@ -23,8 +23,17 @@
 Quick Tunnel（自动生成临时 `trycloudflare.com` 域名）：
 
 ```bash
-sudo bash install.sh install
+bash <(curl -fsSL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)
 ```
+
+上面的命令要求当前 Shell 已经是 root。普通用户请使用：
+
+```bash
+sudo -i bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)'
+```
+
+安装成功后会自动输出 VMess、SS2022 和 VLESS 连接信息，不需要再手动执行 `show`。如果 Quick Tunnel 启动超过等待时间，再执行 `sudo speed-slayer-lite show`。
 
 命名 Tunnel（推荐，先在 Cloudflare 控制台创建 Tunnel，并将 Public Hostname 的 Service 指向 `http://localhost:30000`）：
 
