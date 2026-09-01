@@ -13,6 +13,7 @@
 | `30000/tcp` | `127.0.0.1` | VMess WebSocket 源站 | 不开放 |
 | `30001/tcp+udp` | `0.0.0.0` / `[::]` | Shadowsocks 2022 | 开放 |
 | `30002/tcp` | `0.0.0.0` / `[::]` | VLESS REALITY | 开放 |
+| `30003/tcp` | `127.0.0.1` | REALITY 防盗用守门入站 | 不开放 |
 
 `cloudflared` 还需要出站访问 Cloudflare，通常为 `7844/tcp+udp`，失败时可回退到 `443/tcp`。
 
@@ -35,6 +36,14 @@ sudo -i bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 https://raw.github
 
 安装成功后会自动输出 VMess、SS2022 和 VLESS 连接信息，不需要再手动执行 `show`。如果 Quick Tunnel 启动超过等待时间，再执行 `sudo speed-slayer-lite show`。
 
+旧版已安装机器仅替换 `install.sh` 不会自动重写 Xray 配置，`repair-argo` 也只修复 Tunnel。要启用 REALITY 防盗用守门配置，请先保存现有连接信息，再卸载并重新安装；三条连接的凭据会全部更新：
+
+```bash
+sudo speed-slayer-lite show
+sudo speed-slayer-lite uninstall
+sudo -i bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)'
+```
+
 命名 Tunnel（推荐，先在 Cloudflare 控制台创建 Tunnel，并将 Public Hostname 的 Service 指向 `http://localhost:30000`）：
 
 ```bash
@@ -48,6 +57,7 @@ sudo ARGO_MODE=token \
 
 ```bash
 sudo VMESS_PORT=31000 SS_PORT=31001 REALITY_PORT=31002 \
+  REALITY_GUARD_PORT=31003 \
   REALITY_SERVER_NAME=learn.microsoft.com \
   bash install.sh install
 ```
@@ -82,7 +92,7 @@ ufw allow 30001/udp
 ufw allow 30002/tcp
 ```
 
-不要开放 `30000`。它只供本机 `cloudflared` 访问。
+不要开放 `30000` 和 `30003`。它们只供本机服务访问。
 
 ## 安全设计
 
@@ -90,10 +100,16 @@ ufw allow 30002/tcp
 - systemd 服务启用基础沙箱和资源限制。
 - 固定 Xray/cloudflared 版本，并校验 SHA-256。
 - UUID、SS 密钥、REALITY 私钥和 Tunnel token 均为 root-only。
+- VMess 与 VLESS 使用不同 UUID，避免一个协议凭据泄露后同时影响另一个协议。
+- REALITY 的未认证请求先进入本机 `dokodemo-door`，只允许 SNI 与 `serverNames` 完全一致的 TLS 流量访问目标站，其余进入 `blackhole`。
 - 无 Nginx、无 Web 面板、无订阅 URL。
 - 安装前检查端口冲突；参数只接受受限格式，不使用 `source` 或 `eval`。
 
 更新二进制版本时，必须同时更新 `install.sh` 中对应架构的 SHA-256。
+
+这里的“防盗用”是阻止扫描器把 REALITY 的未认证回落当作通用端口转发。若 VLESS 链接、UUID、REALITY 公钥和 short ID 已泄露，对方仍可作为合法客户端使用；任何服务端配置都无法保证凭据泄露后不被使用，应及时重装或轮换凭据。
+
+实现参考：[XTLS/Xray-examples: VLESS-TCP-REALITY (without being stolen)](https://github.com/XTLS/Xray-examples/tree/main/VLESS-TCP-REALITY%20(without%20being%20stolen))。
 
 ## Cloudflare 说明
 

@@ -100,6 +100,7 @@ create_users() {
 write_config() {
   local keys
   VMESS_UUID=$(xray uuid)
+  VLESS_UUID=$(xray uuid)
   WS_PATH="/$(openssl rand -hex 12)"
   SS_PASSWORD=$(openssl rand -base64 16 | tr -d '\n')
   keys=$(xray x25519)
@@ -134,11 +135,27 @@ write_config() {
       }
     },
     {
+      "tag": "reality-guard",
+      "listen": "127.0.0.1",
+      "port": $REALITY_GUARD_PORT,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "$REALITY_SERVER_NAME",
+        "port": 443,
+        "network": "tcp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["tls"],
+        "routeOnly": true
+      }
+    },
+    {
       "tag": "vless-reality",
       "port": $REALITY_PORT,
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "$VMESS_UUID", "flow": "xtls-rprx-vision" }],
+        "clients": [{ "id": "$VLESS_UUID", "flow": "xtls-rprx-vision" }],
         "decryption": "none"
       },
       "streamSettings": {
@@ -146,15 +163,36 @@ write_config() {
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "target": "$REALITY_SERVER_NAME:443",
+          "target": "127.0.0.1:$REALITY_GUARD_PORT",
           "serverNames": ["$REALITY_SERVER_NAME"],
           "privateKey": "$REALITY_PRIVATE",
           "shortIds": ["$REALITY_SHORT_ID"]
         }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
       }
     }
   ],
-  "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "blackhole", "tag": "block" }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": ["reality-guard"],
+        "domain": ["full:$REALITY_SERVER_NAME"],
+        "outboundTag": "direct"
+      },
+      {
+        "inboundTag": ["reality-guard"],
+        "outboundTag": "block"
+      }
+    ]
+  }
 }
 EOF
   chown root:xray "$APP_DIR/xray.json"
@@ -164,8 +202,10 @@ EOF
 VMESS_PORT=$VMESS_PORT
 SS_PORT=$SS_PORT
 REALITY_PORT=$REALITY_PORT
+REALITY_GUARD_PORT=$REALITY_GUARD_PORT
 VMESS_ADDRESS=$VMESS_ADDRESS
 VMESS_UUID=$VMESS_UUID
+VLESS_UUID=$VLESS_UUID
 WS_PATH=$WS_PATH
 SS_PASSWORD=$SS_PASSWORD
 REALITY_SERVER_NAME=$REALITY_SERVER_NAME
@@ -282,7 +322,7 @@ write_client_info() {
   local requested_address=${VMESS_ADDRESS:-} key value server domain vmess_json vmess_uri ss_user ss_uri reality_uri
   while IFS='=' read -r key value; do
     case $key in
-      VMESS_PORT|SS_PORT|REALITY_PORT|VMESS_ADDRESS|VMESS_UUID|WS_PATH|SS_PASSWORD|REALITY_SERVER_NAME|REALITY_PUBLIC|REALITY_SHORT_ID|ARGO_MODE|ARGO_DOMAIN)
+      VMESS_PORT|SS_PORT|REALITY_PORT|REALITY_GUARD_PORT|VMESS_ADDRESS|VMESS_UUID|VLESS_UUID|WS_PATH|SS_PASSWORD|REALITY_SERVER_NAME|REALITY_PUBLIC|REALITY_SHORT_ID|ARGO_MODE|ARGO_DOMAIN)
         printf -v "$key" '%s' "$value"
         ;;
     esac
@@ -292,13 +332,14 @@ write_client_info() {
   if [[ ${ARGO_MODE:-} == quick ]]; then domain=$(quick_domain); fi
   domain=${domain:-QUICK_TUNNEL_STARTING}
   VMESS_ADDRESS=${requested_address:-${VMESS_ADDRESS:-www.wto.org}}
+  VLESS_UUID=${VLESS_UUID:-$VMESS_UUID}
   validate_domain "$VMESS_ADDRESS" || die "VMESS_ADDRESS 无效"
 
   vmess_json=$(printf '{"v":"2","ps":"vmess-argo","add":"%s","port":"443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s"}' "$VMESS_ADDRESS" "$VMESS_UUID" "$domain" "$WS_PATH" "$domain")
   vmess_uri="vmess://$(printf '%s' "$vmess_json" | base64 -w0)"
   ss_user=$(printf '2022-blake3-aes-128-gcm:%s' "$SS_PASSWORD" | base64 -w0)
   ss_uri="ss://${ss_user}@${server}:${SS_PORT}#ss2022"
-  reality_uri="vless://${VMESS_UUID}@${server}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${REALITY_SHORT_ID}&type=tcp#vless-reality"
+  reality_uri="vless://${VLESS_UUID}@${server}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER_NAME}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${REALITY_SHORT_ID}&type=tcp#vless-reality"
 
   cat >"$APP_DIR/client-info.txt" <<EOF
 VMess + WS + Argo
@@ -321,6 +362,7 @@ do_install() {
   VMESS_PORT=${VMESS_PORT:-30000}
   SS_PORT=${SS_PORT:-30001}
   REALITY_PORT=${REALITY_PORT:-30002}
+  REALITY_GUARD_PORT=${REALITY_GUARD_PORT:-30003}
   VMESS_ADDRESS=${VMESS_ADDRESS:-www.wto.org}
   REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-learn.microsoft.com}
   ARGO_MODE=${ARGO_MODE:-quick}
@@ -330,8 +372,9 @@ do_install() {
   valid_port "$VMESS_PORT" || die "VMESS_PORT 无效"
   valid_port "$SS_PORT" || die "SS_PORT 无效"
   valid_port "$REALITY_PORT" || die "REALITY_PORT 无效"
+  valid_port "$REALITY_GUARD_PORT" || die "REALITY_GUARD_PORT 无效"
   validate_domain "$VMESS_ADDRESS" || die "VMESS_ADDRESS 无效"
-  [[ $VMESS_PORT != "$SS_PORT" && $VMESS_PORT != "$REALITY_PORT" && $SS_PORT != "$REALITY_PORT" ]] || die "三个端口不能重复"
+  [[ $VMESS_PORT != "$SS_PORT" && $VMESS_PORT != "$REALITY_PORT" && $VMESS_PORT != "$REALITY_GUARD_PORT" && $SS_PORT != "$REALITY_PORT" && $SS_PORT != "$REALITY_GUARD_PORT" && $REALITY_PORT != "$REALITY_GUARD_PORT" ]] || die "端口不能重复"
   validate_domain "$REALITY_SERVER_NAME" || die "REALITY_SERVER_NAME 无效"
   [[ $ARGO_MODE == quick || $ARGO_MODE == token ]] || die "ARGO_MODE 只能是 quick 或 token"
   if [[ $ARGO_MODE == token ]]; then
@@ -347,6 +390,7 @@ do_install() {
   port_free "$VMESS_PORT" || die "端口 $VMESS_PORT 已占用"
   port_free "$SS_PORT" || die "端口 $SS_PORT 已占用"
   port_free "$REALITY_PORT" || die "端口 $REALITY_PORT 已占用"
+  port_free "$REALITY_GUARD_PORT" || die "端口 $REALITY_GUARD_PORT 已占用"
   detect_arch
   install_binaries
   create_users
