@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## Lite XHTTP - 2026-10-26
+
+- Lite 新安装的 VLESS 改为 XHTTP + REALITY，使用随机路径与 `mode=auto`，移除 Vision flow，并生成对应分享链接。
+- 新增保留原端口和凭据的 `migrate-xhttp`，包含备份、Xray 配置校验、服务重启和失败恢复；旧安装未迁移时仍输出原 TCP 链接。
+- 新安装可指定 `REALITY_PORT=443`，按需为低权限 Xray 添加端口绑定能力；默认仍为 `30002/TCP`。
+- 新增隔离测试及 README 安装、迁移、客户端配置和 GitHub 上传说明。Bash 语法、原有自检、13 项 XHTTP 检查及真实 Xray `26.3.27` 服务端/客户端配置校验通过；Linux 实机连接尚未验证，完整结果记录在根 README。
+
+## v2.0.9 - 2026-09-05
+
+### Added
+
+- 主版 `speed --brutal` / TCP 子菜单及 Lite `brutal` 子命令，共用独立的 `speed-brutal` 管理器。
+- 固定 TCP Brutal v2.0.0 源码包与 SHA-256，检测内核、headers、systemd 和容器限制。
+- 按单个 IPv4/IPv6 客户端 IP 配置总发送速率，支持开机恢复、状态检查、删除、停用与独立卸载。
+- 路由冲突检查、失败恢复及自有规则清理；默认流程不启用 Brutal，不修改全局 BBR/FQ 或 Argo。
+- README 用法、GitHub 上传清单、修改溯源记录及 `AGENTS.md` 后续记录约定。
+
+### Validation
+
+- Bash 语法、25 项隔离检查及 Lite 原有自检通过；核对上游发布包 SHA-256 和源码包结构。
+- 尚未进行 Linux VPS 的 DKMS 编译/加载、真实 systemd 重启恢复或吞吐测试。
+
 ## v1.0.0 - 2026-04-28
 
 ### Added

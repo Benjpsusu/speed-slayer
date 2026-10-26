@@ -3,10 +3,10 @@ set -euo pipefail
 
 # Speed Slayer short installer
 # Usage:
-#   bash <(curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh) --all
+#   bash <(curl -fsSL https://github.com/Benjpsusu/speed-slayer/raw/main/install.sh) --all
 
-API_URL="https://api.github.com/repos/cshaizhihao/speed-slayer/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
-RAW_URL="https://raw.githubusercontent.com/cshaizhihao/speed-slayer/main/scripts/vps-argo-vmess-oneclick.sh?ts=$(date +%s)"
+API_URL="https://api.github.com/repos/Benjpsusu/speed-slayer/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
+RAW_URL="https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main/scripts/vps-argo-vmess-oneclick.sh?ts=$(date +%s)"
 TMP="/tmp/speed-slayer-install.sh"
 
 if curl -fsSL -H "Accept: application/vnd.github.raw" -H "Cache-Control: no-cache" "$API_URL" -o "$TMP"; then

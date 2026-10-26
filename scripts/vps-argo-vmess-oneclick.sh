@@ -6,9 +6,9 @@ set -euo pipefail
 # - TCP optimize: uses the preserved TCP menu-66 entry.
 # - Argo VMess+WS: native cloudflared + Xray + Nginx implementation, no ArgoX install chain.
 
-REPO_RAW_BASE="https://raw.githubusercontent.com/cshaizhihao/speed-slayer/main"
-SPEED_SLAYER_VERSION="v2.0.8"
-PROJECT_URL="https://github.com/cshaizhihao/speed-slayer"
+REPO_RAW_BASE="https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main"
+SPEED_SLAYER_VERSION="v2.0.9"
+PROJECT_URL="https://github.com/Benjpsusu/speed-slayer"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo .)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd 2>/dev/null || echo .)"
 
@@ -115,6 +115,24 @@ fetch_or_run_script() {
     bash "$tmp_script" "$@"
   fi
 }
+
+run_brutal() (
+  local source_path local_manager tmp
+  source_path="$(readlink -f "${BASH_SOURCE[0]}")"
+  local_manager="$(dirname "$source_path")/../scripts/tcp-brutal.sh"
+  if [ -s "$local_manager" ]; then
+    bash "$local_manager" "$@"
+  elif [ "${1:-menu}" != install ] && [ -s /usr/local/lib/speed-slayer/tcp-brutal.sh ]; then
+    bash /usr/local/lib/speed-slayer/tcp-brutal.sh "$@"
+  else
+    tmp="$(mktemp)" || return 1
+    trap 'rm -f -- "$tmp"' EXIT
+    curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+      'https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main/scripts/tcp-brutal.sh' -o "$tmp" || return 1
+    printf '%s  %s\n' 'f2a0feea7767f2059dd5d9474b22f69fe8e21a4d145a92ba65e356925783ee5c' "$tmp" | sha256sum -c - || return 1
+    bash -n "$tmp" && bash "$tmp" "$@"
+  fi
+)
 
 install_shortcut() {
   require_root
@@ -672,7 +690,7 @@ run_netcheck() {
 
   netcheck_one "IPv4 出站" 'curl -4fsS --max-time 8 https://api.ipify.org' "检查 DNS / 默认路由 / 防火墙" || failed=1
   netcheck_one "DNS 解析" 'getent hosts github.com || nslookup github.com' "检查 /etc/resolv.conf 或 systemd-resolved" || failed=1
-  netcheck_one "GitHub Raw 访问" 'curl -fsS --max-time 12 https://raw.githubusercontent.com/cshaizhihao/speed-slayer/main/README.md' "GitHub 访问异常会影响自更新" || failed=1
+  netcheck_one "GitHub Raw 访问" 'curl -fsS --max-time 12 https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main/README.md' "GitHub 访问异常会影响自更新" || failed=1
   netcheck_one "Cloudflare 访问" 'curl -fsS --max-time 12 https://www.cloudflare.com/cdn-cgi/trace' "Cloudflare 异常会影响 Argo Tunnel" || failed=1
   netcheck_one "HTTPS/443 出站" 'timeout 8 bash -c "</dev/tcp/1.1.1.1/443"' "检查机房出站 443" || failed=1
   if command -v ping >/dev/null 2>&1; then
@@ -1696,7 +1714,7 @@ health_check() {
 remote_version() {
   local tmp api_url
   tmp="$(mktemp /tmp/speed-slayer-version.XXXXXX)"
-  api_url="https://api.github.com/repos/cshaizhihao/speed-slayer/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
+  api_url="https://api.github.com/repos/Benjpsusu/speed-slayer/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
   if curl -fsSL -H 'Accept: application/vnd.github.raw' -H 'Cache-Control: no-cache' "$api_url" -o "$tmp" 2>/dev/null; then
     grep -m1 '^SPEED_SLAYER_VERSION=' "$tmp" | cut -d= -f2- | tr -d '"'
   fi
@@ -1741,7 +1759,7 @@ update_self() {
   mkdir -p "$WORK_DIR"
   local api_url raw_url tmp version_after
   tmp="$INSTALLED_BIN.tmp"
-  api_url="https://api.github.com/repos/cshaizhihao/speed-slayer/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
+  api_url="https://api.github.com/repos/Benjpsusu/speed-slayer/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
   raw_url="${REPO_RAW_BASE}/scripts/vps-argo-vmess-oneclick.sh?$(date +%s)"
 
   rm -f "$tmp"
@@ -1869,6 +1887,7 @@ uninstall_speed_slayer() {
   section "🗑️ Speed Slayer · 删除/卸载"
   warn "此操作会移除 Speed Slayer 安装的快捷命令、续跑状态、Argo/Xray/Nginx 配置、TCP sysctl 配置与 systemd 残留。"
   warn "不会卸载 XanMod 内核本身，避免误删系统内核；如需回退内核，请在系统启动项/包管理器中单独处理。"
+  warn "共享 TCP Brutal 管理器单独保留；如需停用，请执行 speed-brutal disable，移除管理器用 speed-brutal uninstall。"
   local confirm_delete=""
   printf "%b?%b 确认删除 Speed Slayer 相关内容？默认回车 = N %b[y/N]%b " "$C_YELLOW" "$C_RESET" "$C_RED" "$C_RESET"
   read -r confirm_delete || confirm_delete=""
@@ -1923,10 +1942,10 @@ uninstall_speed_slayer() {
   success "Speed Slayer 已删除。保留的 .bak 目录可用于排障回溯。"
   echo ""
   echo "如需继续安装，请执行："
-  echo "  bash <(curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh) --all"
+  echo "  bash <(curl -fsSL https://github.com/Benjpsusu/speed-slayer/raw/main/install.sh) --all"
   echo ""
   echo "如果环境不支持 <(...)，请执行："
-  echo "  curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh -o /tmp/speed-install && bash /tmp/speed-install --all"
+  echo "  curl -fsSL https://github.com/Benjpsusu/speed-slayer/raw/main/install.sh -o /tmp/speed-install && bash /tmp/speed-install --all"
 }
 
 doctor_check() {
@@ -2000,6 +2019,7 @@ Usage:
 Commands:
   --tcp-status           查看 TCP / BBR / 内核状态
   --tcp                  单独执行 TCP 调优流程（等同 --optimize）
+  --brutal [command]     TCP Brutal 可选管理：install/add/del/status/disable/uninstall；不带子命令进入菜单
   --optimize             单独执行 TCP 调优流程：BBR/XanMod/容器降级 + 网络参数
   --argo                 单独执行 Argo VMess+WS 节点流程（等同 --install-argo-vmess）
   --install-argo-vmess   单独安装/重装 Argo VMess+WS，并生成节点/订阅 URL
@@ -2081,6 +2101,7 @@ menu_section_tcp() {
 1. 查看 TCP / BBR / 内核状态
 2. 执行 TCP 优化
 3. 重启后继续安装
+4. TCP Brutal 管理（可选，直连 TCP）
 0. 返回主页
 EOF
     read -r -p "请选择: " choice
@@ -2088,6 +2109,7 @@ EOF
       1) tcp_status_panel; menu_pause ;;
       2) run_tcp_optimize; menu_pause ;;
       3) continue_after_reboot; menu_pause ;;
+      4) run_brutal menu; menu_pause ;;
       0) return 0 ;;
       *) err "无效选择"; menu_pause ;;
     esac
@@ -2193,6 +2215,7 @@ default_action() {
 case "${1:-}" in
   --tcp-status) tcp_status_panel ;;
   --tcp) run_tcp_optimize ;;
+  --brutal) shift; run_brutal "$@" ;;
   --optimize) run_tcp_optimize ;;
   --argo) install_argo_vmess_ws ;;
   --install-argo-vmess) install_argo_vmess_ws ;;
