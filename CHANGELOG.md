@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v2.1.0 - 2026-10-26
+
+- 删除 TCP Brutal 模块、测试、主版和 Lite 入口；历史修改记录保留。
+- Lite 默认进入管理菜单，支持勾选创建 VMess / SS2022 / VLESS；未选协议不部署，未选 VMess 不下载或启动 Argo。
+- VLESS 支持默认 `learn.microsoft.com` / 自定义 SNI，新安装默认 TCP 443 并允许自定义端口；同步生成目标、守门规则和链接。
+- 新增保留配置与凭据的管理脚本/内核更新，固定 Xray 26.10.21、cloudflared 2026.10.3 及 amd64/arm64 摘要，备份校验后切换，失败时恢复。
+- 卸载默认取消，确认后删除 Lite 节点与备份，保留共享二进制和账户；主版新增 `--lite` 与菜单 8。
+- 新增协议组合、交互、更新恢复、旧状态兼容、卸载范围测试，完整验证与未验证项见根 README 当日记录。
+
 ## Lite XHTTP - 2026-10-26
 
 - Lite 新安装的 VLESS 改为 XHTTP + REALITY，使用随机路径与 `mode=auto`，移除 Vision flow，并生成对应分享链接。

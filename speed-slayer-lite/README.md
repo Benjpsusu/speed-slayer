@@ -1,167 +1,224 @@
 # Speed Slayer Lite
 
-只部署三种 Xray 入站，不安装 Nginx，不提供 HTTP 订阅：
+按需创建以下节点，可任选一种或多种：
 
 - VMess + WebSocket + Cloudflare Tunnel
-- Shadowsocks 2022 (`2022-blake3-aes-128-gcm`)
-- VLESS + XHTTP + REALITY（独立随机路径，`mode=auto`，不启用 Vision flow）
+- Shadowsocks 2022（`2022-blake3-aes-128-gcm`）
+- VLESS + XHTTP + REALITY（随机路径、`mode=auto`、Flow 留空）
 
-## 端口
+未勾选的协议不生成入站或节点链接。只有勾选 VMess 才下载 cloudflared、创建其账户/配置并启动 Argo。不安装 Nginx，不提供 HTTP 订阅。
 
-| 默认端口 | 监听地址 | 用途 | 防火墙 |
-| --- | --- | --- | --- |
-| `30000/tcp` | `127.0.0.1` | VMess WebSocket 源站 | 不开放 |
-| `30001/tcp+udp` | `0.0.0.0` / `[::]` | Shadowsocks 2022 | 开放 |
-| `30002/tcp` | `0.0.0.0` / `[::]` | VLESS XHTTP + REALITY | 开放 |
-| `30003/tcp` | `127.0.0.1` | REALITY 防盗用守门入站 | 不开放 |
+## 一键打开管理菜单
 
-`cloudflared` 还需要出站访问 Cloudflare，通常为 `7844/tcp+udp`，失败时可回退到 `443/tcp`。
+支持 Debian 11+、Ubuntu 20.04+，amd64/arm64，需要 systemd。以下命令在 **Linux VPS 上以 root 执行**；普通用户先运行 `sudo -i`。
 
-XHTTP + REALITY 直连只需要对应的 **TCP** 端口，不需要开放同号 UDP。默认保持 `30002`，新安装可用 `REALITY_PORT=443` 改为 `443/TCP`；此时脚本为低权限 Xray 服务授予 `CAP_NET_BIND_SERVICE`，并检查端口是否已被占用。
-
-## 安装
-
-支持 Debian 11+、Ubuntu 20.04+，架构为 amd64 或 arm64。必须用 root 执行。
-系统必须使用 systemd；不支持未运行 systemd 的容器环境。
-
-Quick Tunnel（自动生成临时 `trycloudflare.com` 域名）：
+先把新版文件上传到 GitHub，然后执行：
 
 ```bash
 bash <(curl -fsSL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)
 ```
 
-上面的命令要求当前 Shell 已经是 root。普通用户请使用：
+新安装和已有安装都显示菜单：
 
-```bash
-sudo -i bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)'
+```text
+1. 创建节点（勾选协议 / 选择 SNI）
+2. 查看节点链接
+3. 查看运行状态
+4. 更新脚本和内核（保留节点配置）
+5. 卸载 Lite 节点
+6. 修复 VMess / Argo 隧道
+7. 旧 VLESS TCP 节点迁移到 XHTTP
+0. 退出
 ```
 
-安装成功后会自动输出 VMess、SS2022 和 VLESS 连接信息，不需要再手动执行 `show`。如果 Quick Tunnel 启动超过等待时间，再执行 `sudo speed-slayer-lite show`。
+安装成功后运行 `speed-slayer-lite` 即可再次打开菜单。旧版快捷命令尚未包含菜单时，先运行上面的 GitHub 一键命令，选择 `4` 更新。
 
-### 旧版 TCP / Vision 节点一键切换为 XHTTP
+主版也可执行 `speed --lite`，或在 `speed` 主菜单选择 `8. 多协议节点`。根目录 `install.sh` 默认仍进入主版；带 `--lite` 可直接打开本菜单。
 
-仅替换脚本或运行 `show` 不会改变现有入站。以下命令以 **root** 执行；需先将新版文件上传到 GitHub：
+## 勾选协议和设置 SNI
 
-```bash
-bash <(curl -fsSL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh) migrate-xhttp
+菜单选 `1` 后显示：
+
+```text
+[ ] 1. VMess + WebSocket + Argo
+[ ] 2. Shadowsocks 2022
+[ ] 3. VLESS + XHTTP + REALITY
+
+a. 全选  n. 清空  0. 取消  回车：确认选择
 ```
 
-已下载新版脚本时，也可执行 `sudo bash install.sh migrate-xhttp`；本机快捷命令已更新后可用 `sudo speed-slayer-lite migrate-xhttp`。
+输入编号切换 `[ ]` / `[x]`，可一次输入 `1 3`；选好后按回车。初始不勾选，至少选择一个协议。
 
-迁移保留原来的端口、UUID、REALITY 密钥、short ID、SNI，以及 VMess/SS2022 和已有守门配置，只切换 VLESS 传输并生成匹配的新链接。会按需安装 Python 3，备份到 `/etc/speed-slayer-lite/backup-xhttp-<时间>.<随机后缀>/`，先通过 `xray run -test`，再切换配置并重启 Xray。切换或服务启动失败时自动恢复配置、状态、安装脚本和原节点信息文件；自动恢复失败会报告备份位置。
+选中 VLESS 才会询问 SNI：
 
-**迁移会短暂断开连接，完成后必须重新导入 VLESS 链接。** Xray 重启可能连带重启 cloudflared，Quick Tunnel 域名可能变化，此时 VMess 也需重新导入。重复迁移保留已生成的 XHTTP 路径。迁移不会修改端口；环境变量 `REALITY_PORT`、`XHTTP_PATH` 的定制只用于新安装。
+- `1` 或直接回车：使用 `learn.microsoft.com`。
+- `2`：输入自定义域名，例如 `www.example.com`；不要填写 `https://`、端口或路径。
+- 自定义 SNI 同步用于 REALITY 的 `serverNames`、目标站、SNI 守门规则和客户端链接。这里继续使用外部目标站，不自动创建自建网站。
 
-已有自定义 XHTTP 模式/额外参数、state 与配置中的 UUID/端口不一致，或自定义的入站类型，不自动覆盖。没有 `reality-guard` 的更早旧安装不会在迁移时自动新增守门入站。
+随后询问 VLESS 的 TCP 端口，新安装默认 `443`，可改为 `1024–65535` 的其他端口。443 已占用时安装停止，不覆盖其他服务。现有节点更新时保持原端口，不会把旧的 30002 自动改成 443。
 
-### 自定义新安装
+SNI 输入会检查域名格式，但不代表目标站的 TLS 1.3/HTTP/2 支持及连通性已验证。实测 Xray `26.10.21` 会对默认的 `learn.microsoft.com` 输出封锁风险警告；本脚本按用户选择保留此默认值，也允许自定义。443 和自定义 SNI 都不能保证避免 IP 封锁。
 
-命名 Tunnel（推荐，先在 Cloudflare 控制台创建 Tunnel，并将 Public Hostname 的 Service 指向 `http://localhost:30000`）：
+已有安装不能在更新时重新勾选协议；更新保留现有节点。若要重新创建一组节点，需要先卸载，原凭据会被删除。
+
+## 更新与卸载
+
+选择菜单 `4`，或执行：
 
 ```bash
-sudo ARGO_MODE=token \
-  ARGO_TOKEN='你的 Tunnel token' \
-  ARGO_DOMAIN='你的域名.example.com' \
+sudo speed-slayer-lite update
+```
+
+更新先下载仓库新版管理脚本，再由新版脚本下载它固定的内核版本，并校验对应架构的 SHA-256。本版固定 **Xray 26.10.21、cloudflared 2026.10.3**；仅在安装了 VMess 时更新 cloudflared。不会自动追随上游未经本仓库固定的 Latest。
+
+- 将旧内核、配置、state、管理脚本和节点信息备份到 `/etc/speed-slayer-lite/backup-update-<时间>.<随机后缀>/`，目录权限 `0700`。
+- 候选内核先执行配置校验，通过后替换二进制、更新管理脚本并重启相关服务。
+- 保留协议选择、端口、SNI、UUID、密钥和路径；不会把旧 TCP/Vision 配置自动改为 XHTTP。
+- 下载/校验失败时不切换；切换后服务启动、获取 Quick Tunnel 域名或节点信息生成失败，会尝试恢复旧内核和管理脚本。自动恢复失败会报告备份位置。
+- 重启会短暂断开连接，Quick Tunnel 域名可能改变。更新完成后查看输出；域名变化时重新导入 VMess 链接。恢复旧内核后域名也可能变化，应运行 `show` 刷新。
+
+选择菜单 `5` 卸载，需要输入 `y` 确认，直接回车取消。也可以：
+
+```bash
+sudo speed-slayer-lite uninstall
+```
+
+卸载停止并删除 Lite 服务、配置、凭据、快捷命令，以及 Lite 目录内的更新/迁移备份。共享的 `/usr/local/bin/xray`、`cloudflared` 二进制和系统账户保留。无人值守卸载可以显式添加 `--yes`。
+
+## 端口与防火墙
+
+| 端口默认值 | 用途 | 是否放行公网 |
+| --- | --- | --- |
+| `127.0.0.1:30000/TCP` | 已选 VMess 的 WebSocket 源站 | 不放行 |
+| `30001/TCP+UDP` | 已选 SS2022 | 放行 |
+| `443/TCP` | 新建 VLESS XHTTP + REALITY | 放行；已安装节点用原端口 |
+| `127.0.0.1:30003/TCP` | 已选 VLESS 的 REALITY 守门入站 | 不放行 |
+
+只检查所选协议需要的端口，且这些端口不能重复。脚本不修改系统防火墙或云安全组；按实际选择开放公网端口。Xray 以独立账户运行，只有 VLESS 使用 443 时才授予低端口绑定能力。
+
+VMess 经 Cloudflare 接入时客户端使用 443，服务器源站端口无需暴露。cloudflared 需要到 Cloudflare 的出站连接，详见[官方防火墙要求](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/)。
+
+## 命令行与自动安装
+
+不带参数进入菜单。显式 `install` 在交互终端且未设置 `PROTOCOLS` 时也会显示勾选；自动化建议始终明确设置 `PROTOCOLS`。非交互 `install` 未指定协议时，为兼容旧用法仍选择全部三种协议。
+
+只安装 VLESS，使用自定义 SNI 和端口：
+
+```bash
+PROTOCOLS=vless REALITY_SERVER_NAME='www.example.com' REALITY_PORT=8443 \
   bash install.sh install
 ```
 
-自定义端口及 REALITY 伪装站点：
+安装 VMess 和 SS2022，使用命名 Tunnel：
 
 ```bash
-sudo VMESS_PORT=31000 SS_PORT=31001 REALITY_PORT=31002 \
-  REALITY_GUARD_PORT=31003 \
-  REALITY_SERVER_NAME=learn.microsoft.com \
+PROTOCOLS=vmess,ss2022 ARGO_MODE=token \
+  ARGO_TOKEN='你的 Tunnel token' ARGO_DOMAIN='你的隧道域名.example.com' \
   bash install.sh install
 ```
 
-希望新安装使用 **443/TCP**，以 root 执行：
+命名 Tunnel 的 Public Hostname 服务地址应指向 `http://127.0.0.1:30000`（自定义 `VMESS_PORT` 时相应修改）。未选 VMess 时忽略 Argo 参数。默认 Quick Tunnel 会自动分配临时域名。
 
-```bash
-REALITY_PORT=443 bash <(curl -fsSL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)
-```
-
-也可用 `sudo REALITY_PORT=443 bash install.sh install`。请在系统防火墙与云安全组放行 `443/TCP`；若已有网站占用 443，脚本会停止，应选择其他空闲端口。其他端口参数继续只接受 `1024–65535`。
-
-XHTTP 路径默认随机生成并保存到 `state`；新安装可设置 `XHTTP_PATH=/your_random_path`，允许以 `/` 开头、后接 1–128 个字母、数字、`/`、`_` 或 `-`。
-
-安装完成后，连接信息只写到 `/etc/speed-slayer-lite/client-info.txt`，权限 `0600`：
+其他新安装参数：`VMESS_PORT`、`SS_PORT`、`REALITY_GUARD_PORT`、`VMESS_ADDRESS`、`XHTTP_PATH`。XHTTP 路径默认随机生成；自定义需以 `/` 开头，后接 1–128 个字母、数字、`/`、`_` 或 `-`。更新命令始终使用已安装配置。
 
 ```bash
 sudo speed-slayer-lite show
 sudo speed-slayer-lite status
 sudo speed-slayer-lite repair-argo
 sudo speed-slayer-lite migrate-xhttp
-sudo speed-slayer-lite uninstall
 ```
 
-Quick Tunnel 域名可能在首次启动后数秒才出现。再次执行 `speed-slayer-lite show` 会刷新 VMess 链接。
-`repair-argo` 会重启 Xray 和 cloudflared，等待新的 Quick Tunnel 域名，并输出更新后的 VMess 链接。Quick Tunnel 修复后必须在客户端重新导入该链接。
+`show` 只输出已安装协议的链接，凭据文件 `/etc/speed-slayer-lite/client-info.txt` 权限为 `0600`。未获取到临时域名时显示等待提示，不生成含占位域名的 VMess 链接。
 
-VMess 链接中 `add` 默认是 `www.wto.org`，`host` 和 `sni` 仍然是当前 Tunnel 域名。这样要求 `www.wto.org` 在你的网络环境中解析到可用的 Cloudflare 边缘地址；如果客户端连不上，将 `VMESS_ADDRESS` 改为当前 Tunnel 域名：
+`repair-argo` 仅适用于已安装 VMess 的节点，会重启相关服务并刷新链接；完成后重新导入 VMess。VMess 的连接地址默认 `www.wto.org`，Host/SNI 为隧道域名；若本地网络无法连接该地址，可将连接地址改为实际隧道域名，Host/SNI 保持匹配：
 
 ```bash
-sudo VMESS_ADDRESS='你的-tunnel.trycloudflare.com' bash install.sh show
+sudo VMESS_ADDRESS='你的隧道.trycloudflare.com' speed-slayer-lite show
 ```
 
-如果你使用的是命名 Tunnel，也可以把 `VMESS_ADDRESS` 设为你自己的 Cloudflare 域名。`add`、`host`、`sni` 不是同一个字段，不能只把 `host/sni` 改成 `www.wto.org`。
+## 旧 VLESS TCP 节点迁移到 XHTTP
 
-### 客户端设置与兼容性
-
-使用支持 **XHTTP + REALITY** 的客户端及内核，优先导入新生成的 VLESS 链接；仍只支持 TCP/WS 的客户端无法使用本节点。手动填写时：
-
-| 字段 | 值 |
-| --- | --- |
-| 协议 | VLESS |
-| 地址 / 端口 | VPS 地址 / 实际 `REALITY_PORT` |
-| 传输 | `xhttp` |
-| 模式 | `auto` |
-| Path | 本次生成的 `XHTTP_PATH`，与服务端一致 |
-| 安全 | `reality` |
-| Flow | **留空**，本配置不使用 `xtls-rprx-vision` |
-| SNI / 公钥 / short ID | 从生成链接读取，保持一致 |
-
-链接包含 `type=xhttp&mode=auto&path=...`，路径按 URL 规则编码；不再包含 Vision flow。查看尚未迁移的旧安装时仍输出原 TCP 链接，避免把未切换的服务错误标注为 XHTTP。
-
-实现按脚本固定的 Xray `26.3.27` 验证，参考 [Xray 官方 XHTTP + REALITY 示例](https://github.com/XTLS/Xray-examples/tree/main/VLESS-XHTTP-Reality/minimal-steal_others)与[分享链接规范](https://github.com/XTLS/Xray-core/discussions/716)。这仍是客户端直连 VPS 的方案；若整个 IP 在客户端网络不可达，换 XHTTP 或端口不会恢复 IP 可达性。
-
-## 可选 TCP Brutal v2
-
-普通 Lite 安装不会启用 Brutal。它适用于 **REALITY 和 SS2022 的 TCP 流量**；SS2022 UDP 和默认 QUIC Argo 隧道不受影响。保留现有节点配置、凭据及系统默认 BBR。
-
-要求运行 systemd 的 Debian/Ubuntu、当前 Linux 内核 >= 5.10、匹配的 headers，以及加载内核模块的权限。管理器不会在容器中强装模块。
-
-在安装了新版 Lite 的 Linux VPS 上执行：
+菜单 `7` 或 `migrate-xhttp` 会保留端口和凭据，备份、校验配置后切换 VLESS 传输，失败时恢复。没有安装 VLESS 时拒绝迁移。也可以使用 GitHub 新脚本执行：
 
 ```bash
-sudo speed-slayer-lite brutal install
-
-# 把示例 IP 换成客户端连接 VPS 时的公网 IP；100 为实际可用总带宽 Mbps
-sudo speed-slayer-lite brutal add 203.0.113.5 100
-sudo speed-slayer-lite brutal status
-
-# 更新速率或删除规则
-sudo speed-slayer-lite brutal add 203.0.113.5 80
-sudo speed-slayer-lite brutal del 203.0.113.5
-
-sudo speed-slayer-lite brutal disable    # 清除自有规则，停用开机恢复，保留备份
-sudo speed-slayer-lite brutal uninstall  # 移除管理器；共享内核模块与备份保留
+bash <(curl -fsSL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh) migrate-xhttp
 ```
 
-安装后也可以直接使用 `sudo speed-brutal ...`。旧版 Lite 没有 `brutal` 子命令时，无需重装或轮换节点凭据，可按[根 README 的 GitHub 安装命令](../README.md#安装与首次使用)安装独立管理器。
+重复迁移保留路径；旧安装未迁移时 `show` 继续输出 TCP/Vision 链接。迁移不会升级内核，也不会新增更早旧版中缺少的守门入站。完成后重新导入 VLESS；如果 Argo 临时域名变化，也重新导入 VMess。
 
-- 只接受单个 IPv4/IPv6 IP（或 `/32`、`/128`），不接受网段；存在策略路由或目标路由冲突时停止。
-- 参数填写**客户端 IP**，不是 VPS IP、Argo 域名或 REALITY 伪装站。所有发往该 IP 的 TCP 连接共享速率，包括其他应用；客户端 IP 变化后要更新规则。
-- 带宽支持整数 `1–100000` Mbps，应按 VPS 到客户端的实际链路填写，不采用 VPS Speedtest 上传值；过高可能增加丢包和带宽消耗。
-- 添加新规则后重新建立客户端连接；修改已有规则速率可实时生效；删除后已有连接仍需关闭重连。
-- 规则保存在 `/etc/speed-slayer-brutal/rules.tsv`，由 systemd 开机恢复。停用只删除本管理器的规则，失败条目保留以便重试。
-- 主版和 Lite 共用管理器。卸载 Lite 会保留它，需要停用时先执行 `sudo speed-brutal disable`。
+客户端需要支持 XHTTP + REALITY：传输 `xhttp`、模式 `auto`、Flow 留空，Path/SNI/公钥/short ID 均使用生成链接中的值。
 
-GitHub 上传时必须一并上传 **`scripts/tcp-brutal.sh`**，不能只上传 Lite 文件夹。用法、文件清单、日志排查和上游来源见[根 README 的 TCP Brutal 说明](../README.md#tcp-brutal-v2可选直连-tcp-加速)。
+## 验证与维护
+
+在仓库内运行：
+
+```bash
+bash speed-slayer-lite/test.sh
+```
+
+需要 Bash、Python 3、OpenSSL。默认隔离系统服务和下载；设置 `SPEED_TEST_XRAY=/path/to/xray` 可用真实内核校验配置。Windows 可通过 PowerShell 7 调用 Git Bash，设置 `SPEED_TEST_PYTHON` 指向 Python 可执行文件。测试不操作真实 systemd 服务。
+
+上传 GitHub 时同步上传主版脚本、Lite 安装脚本、`test.sh`、`test-xhttp.sh`、`test-manage.sh`、两份 README 和 CHANGELOG，并提交旧 Brutal 脚本及其测试文件的删除。历史修改记录保留。
+
+### VMess 单独不通：检查系统时间
+
+如果 Argo 已连接，其他节点正常，但 VMess 日志出现 `invalid user > invalid timestamp, perhaps unsynchronized time`，先检查服务器和客户端的系统时间。VMess 认证依赖 UTC 时间；[Xray 官方文档](https://xtls.github.io/config/inbounds/vmess.html)要求时间误差在 120 秒以内。修改显示时区不能修复时钟漂移。
+
+在 Linux VPS 上检查：
+
+```bash
+sudo timedatectl status
+sudo journalctl -u xray-lite -n 50 --no-pager
+```
+
+若已有对时服务，修复现有服务并确认同步成功；若没有安装对时服务，Debian/Ubuntu 可安装并启用 chrony：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends chrony
+sudo systemctl enable --now chrony
+sudo chronyc tracking
+sudo timedatectl status
+```
+
+首次启动需要等待对时；确认 `Leap status: Normal` 和 `System clock synchronized: yes`，不能只看 chrony 进程是否启动。客户端也应开启系统自动对时，然后重新连接原 VMess 节点。仅修复时间无需重启 Xray/Argo，也无需换链接。
+
+2026-10-26 实机排查中，服务器慢约 139.4 秒且没有 NTP 服务，恢复 chrony 后原 VMess 链接通过完整联网测试，用户确认恢复。Lite 安装脚本目前不自动配置 NTP，新服务器部署前应先确认自动校时可用。
+
+
+## 安全与 Cloudflare 说明
+
+配置和凭据只保存在服务器，REALITY 私钥不写入分享链接；Xray/cloudflared 使用独立低权限账户，服务保留系统沙箱限制。SNI 守门用于限制未认证请求的回落目标，不能阻止已经拿到完整节点凭据的人使用节点。
+
+Quick Tunnel 适合测试，域名可能随重启变化。需要稳定域名时使用命名 Tunnel；参考 [Quick Tunnels 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)。
 
 ## 修改记录（溯源）
+
+### 2026-10-26 — 协议勾选、SNI 选择、更新卸载菜单，移除 Brutal
+
+- 默认进入管理菜单，支持勾选任意协议组合；仅选择 VMess 时部署 cloudflared，未选协议不生成配置和链接。旧 state 未记录协议时兼容原来的全协议安装。
+- VLESS SNI 提供默认 `learn.microsoft.com` 和自定义输入；同步目标站、守门规则与分享链接。新安装默认 TCP 443，可交互修改，已有节点更新保留端口。
+- 新增 `update`：由仓库最新版管理脚本固定内核版本，备份、校验候选、替换、重启，失败时恢复旧内核/脚本；保留节点配置和凭据。固定 Xray `26.10.21`、cloudflared `2026.10.3`，核对 amd64/arm64 下载摘要。
+- 新增卸载确认，取消或输入结束不会删除节点；去掉 Lite 的 Brutal 命令，主版同步移除入口并新增 `--lite` / 菜单 8。历史记录不删除。
+- 涉及 `install.sh`、新增 `test-manage.sh`、测试入口及两份 README；完整文件清单见根 README。
+- 验证：Bash 语法、原有 Lite 自检、13 项 XHTTP 检查及 23 项管理检查通过；用真实 Windows Xray `26.10.21` 校验七种协议组合和更新候选，覆盖故障恢复、旧状态、交互和卸载范围。真实 Linux amd64/arm64 的四份发布文件摘要已核对，下载和 systemd 流程在测试中使用替身。未在真实 VPS 执行本版安装、更新或卸载，也未测试新版 Linux 内核的实际联网和长期运行。
+
+### 2026-10-26 — 新版 Xray 兼容性评估
+
+- 核对[官方 v26.10.21 发布说明](https://github.com/XTLS/Xray-core/releases/tag/v26.10.21)：截至本日它是 Latest，含证书相关安全修复；当前脚本仍固定 `26.3.27`，不会自动跟随上游更新。
+- 校验官方 Windows 发布包摘要后，用真实 `26.10.21` 内核执行 `test-xhttp.sh`，13 项检查通过；完整服务端（含 VMess/WS、SS2022、XHTTP + REALITY）、XHTTP 客户端和迁移候选配置均通过校验。服务操作仍使用替身。
+- 本次只更新两份 README，未升级服务器或修改安装版本；新版 Linux ARM64 实际联网与长期稳定性尚未验证。
+- 现有脚本没有独立的内核升级命令，`migrate-xhttp` 不更新内核。正式升级需备份、校验候选、同步版本与摘要、重启后逐节点验证并准备恢复；Quick Tunnel 域名可能随重启变化。完整结果见[根 README 修改记录](../README.md#修改记录溯源)。
+
+### 2026-10-26 — VMess 时间漂移故障排查与恢复
+
+- 排查发现服务器 UTC 慢约 139.4 秒、未启用对时服务，Xray 拒绝 VMess 请求并报 `invalid timestamp`；UUID、WS 路径和 Argo 隧道均正常。
+- 在服务器安装并启用 chrony 后完成时间同步；Xray/cloudflared 进程、节点凭据和域名保持原样。
+- 用原链接构造临时 Xray 客户端，经 Cloudflare 隧道访问 HTTPS 测试地址得到 HTTP 204/200；用户重连后确认恢复正常。临时客户端已结束，测试文件已清理。
+- 本 README 新增诊断与校时操作，根 README 同步记录服务器变更、验证结果和未验证项；安装脚本未修改，后续新装仍需自行确认 NTP。
+- 已验证当前时间同步和 VMess 联网；未进行 VPS 重启恢复或长期稳定性测试。完整记录见[根 README 修改记录](../README.md#修改记录溯源)。
 
 ### 2026-10-26 — VLESS 直连改为 XHTTP + REALITY
 
@@ -178,49 +235,3 @@ GitHub 上传时必须一并上传 **`scripts/tcp-brutal.sh`**，不能只上传
 - 新增安装、客户端 IP / Mbps 配置、状态查看、删除、停用和独立卸载说明。
 - 普通 Lite 安装、REALITY/SS2022/VMess 配置及凭据生成逻辑保持原样；Brutal 不随节点安装自动启用。
 - 验证结果统一记录在[根 README 修改记录](../README.md#修改记录溯源)。尚未验证 Linux VPS 的 DKMS 加载、重启恢复和实际加速效果。
-
-## 防火墙
-
-脚本不会修改防火墙。按你的 SSH 来源限制管理端口，并只开放：
-
-```bash
-ufw allow 30001/tcp
-ufw allow 30001/udp
-ufw allow 30002/tcp
-```
-
-不要开放 `30000` 和 `30003`。它们只供本机服务访问。
-如果新安装时指定了 `REALITY_PORT=443`，把上面的 `ufw allow 30002/tcp` 改为 `ufw allow 443/tcp`；自定义端口同理。
-
-## 安全设计
-
-- Xray 和 cloudflared 使用独立低权限账户。
-- systemd 服务启用基础沙箱和资源限制。
-- 固定 Xray/cloudflared 版本，并校验 SHA-256。
-- UUID、SS 密钥、REALITY 私钥和 Tunnel token 均为 root-only。
-- 命名 Tunnel token 通过 systemd 环境传入，不出现在 cloudflared 命令行参数中。
-- VMess 与 VLESS 使用不同 UUID，避免一个协议凭据泄露后同时影响另一个协议。
-- REALITY 的未认证请求先进入本机 `dokodemo-door`，只允许 SNI 与 `serverNames` 完全一致的 TLS 流量访问目标站，其余进入 `blackhole`。
-- 无 Nginx、无 Web 面板、无订阅 URL。
-- 安装前检查端口冲突；参数只接受受限格式，不使用 `source` 或 `eval`。
-
-更新二进制版本时，必须同时更新 `install.sh` 中对应架构的 SHA-256。
-
-修改脚本后可执行最小自检：
-
-```bash
-bash speed-slayer-lite/test.sh
-```
-
-测试需要 Python 3、Bash、OpenSSL。默认用替身隔离 systemd/Xray，不修改系统服务；设置 `SPEED_TEST_XRAY=/path/to/xray` 可用真实内核执行配置校验，仍不会启动代理服务。Windows 可通过 PowerShell 调用 Git Bash，并用 `SPEED_TEST_PYTHON` 指定 Python 可执行文件。
-
-这里的“防盗用”是阻止扫描器把 REALITY 的未认证回落当作通用端口转发。若 VLESS 链接、UUID、REALITY 公钥和 short ID 已泄露，对方仍可作为合法客户端使用；任何服务端配置都无法保证凭据泄露后不被使用，应及时重装或轮换凭据。
-
-实现参考：[XTLS/Xray-examples: VLESS-TCP-REALITY (without being stolen)](https://github.com/XTLS/Xray-examples/tree/main/VLESS-TCP-REALITY%20(without%20being%20stolen))。
-
-## Cloudflare 说明
-
-Quick Tunnel 适合测试，不保证长期域名稳定，也不支持 SSE。长期使用请选择命名 Tunnel。
-
-- [Quick Tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)
-- [Tunnel 防火墙要求](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/)

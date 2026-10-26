@@ -7,7 +7,7 @@ set -euo pipefail
 # - Argo VMess+WS: native cloudflared + Xray + Nginx implementation, no ArgoX install chain.
 
 REPO_RAW_BASE="https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main"
-SPEED_SLAYER_VERSION="v2.0.9"
+SPEED_SLAYER_VERSION="v2.1.0"
 PROJECT_URL="https://github.com/Benjpsusu/speed-slayer"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo .)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd 2>/dev/null || echo .)"
@@ -116,23 +116,9 @@ fetch_or_run_script() {
   fi
 }
 
-run_brutal() (
-  local source_path local_manager tmp
-  source_path="$(readlink -f "${BASH_SOURCE[0]}")"
-  local_manager="$(dirname "$source_path")/../scripts/tcp-brutal.sh"
-  if [ -s "$local_manager" ]; then
-    bash "$local_manager" "$@"
-  elif [ "${1:-menu}" != install ] && [ -s /usr/local/lib/speed-slayer/tcp-brutal.sh ]; then
-    bash /usr/local/lib/speed-slayer/tcp-brutal.sh "$@"
-  else
-    tmp="$(mktemp)" || return 1
-    trap 'rm -f -- "$tmp"' EXIT
-    curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
-      'https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main/scripts/tcp-brutal.sh' -o "$tmp" || return 1
-    printf '%s  %s\n' 'f2a0feea7767f2059dd5d9474b22f69fe8e21a4d145a92ba65e356925783ee5c' "$tmp" | sha256sum -c - || return 1
-    bash -n "$tmp" && bash "$tmp" "$@"
-  fi
-)
+run_lite() {
+  fetch_or_run_script "${ROOT_DIR}/speed-slayer-lite/install.sh" "speed-slayer-lite/install.sh" "$@"
+}
 
 install_shortcut() {
   require_root
@@ -1887,7 +1873,6 @@ uninstall_speed_slayer() {
   section "🗑️ Speed Slayer · 删除/卸载"
   warn "此操作会移除 Speed Slayer 安装的快捷命令、续跑状态、Argo/Xray/Nginx 配置、TCP sysctl 配置与 systemd 残留。"
   warn "不会卸载 XanMod 内核本身，避免误删系统内核；如需回退内核，请在系统启动项/包管理器中单独处理。"
-  warn "共享 TCP Brutal 管理器单独保留；如需停用，请执行 speed-brutal disable，移除管理器用 speed-brutal uninstall。"
   local confirm_delete=""
   printf "%b?%b 确认删除 Speed Slayer 相关内容？默认回车 = N %b[y/N]%b " "$C_YELLOW" "$C_RESET" "$C_RED" "$C_RESET"
   read -r confirm_delete || confirm_delete=""
@@ -2018,8 +2003,8 @@ Usage:
 
 Commands:
   --tcp-status           查看 TCP / BBR / 内核状态
+  --lite [command]       多协议 Lite 菜单、更新和卸载
   --tcp                  单独执行 TCP 调优流程（等同 --optimize）
-  --brutal [command]     TCP Brutal 可选管理：install/add/del/status/disable/uninstall；不带子命令进入菜单
   --optimize             单独执行 TCP 调优流程：BBR/XanMod/容器降级 + 网络参数
   --argo                 单独执行 Argo VMess+WS 节点流程（等同 --install-argo-vmess）
   --install-argo-vmess   单独安装/重装 Argo VMess+WS，并生成节点/订阅 URL
@@ -2101,7 +2086,6 @@ menu_section_tcp() {
 1. 查看 TCP / BBR / 内核状态
 2. 执行 TCP 优化
 3. 重启后继续安装
-4. TCP Brutal 管理（可选，直连 TCP）
 0. 返回主页
 EOF
     read -r -p "请选择: " choice
@@ -2109,7 +2093,6 @@ EOF
       1) tcp_status_panel; menu_pause ;;
       2) run_tcp_optimize; menu_pause ;;
       3) continue_after_reboot; menu_pause ;;
-      4) run_brutal menu; menu_pause ;;
       0) return 0 ;;
       *) err "无效选择"; menu_pause ;;
     esac
@@ -2177,6 +2160,7 @@ menu_body() {
   5. 诊断与日志
   6. 修复/清理/卸载
   7. 更新
+  8. 多协议节点（Lite：VMess / SS2022 / VLESS）
   0. 退出
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
@@ -2189,6 +2173,7 @@ EOF
       5) menu_section_diag ;;
       6) menu_section_repair ;;
       7) menu_section_system ;;
+      8) run_lite; menu_pause ;;
       0) exit 0 ;;
       *) err "无效选择"; menu_pause ;;
     esac
@@ -2213,9 +2198,9 @@ default_action() {
 }
 
 case "${1:-}" in
+  --lite) shift; run_lite "$@" ;;
   --tcp-status) tcp_status_panel ;;
   --tcp) run_tcp_optimize ;;
-  --brutal) shift; run_brutal "$@" ;;
   --optimize) run_tcp_optimize ;;
   --argo) install_argo_vmess_ws ;;
   --install-argo-vmess) install_argo_vmess_ws ;;

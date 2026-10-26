@@ -38,7 +38,7 @@
 - **XanMod / BBR v3**：自动检测内核状态，安装内核组件，并支持重启后续跑。
 - **容器降级模式**：容器环境不强装宿主机内核，只应用容器内可生效配置。
 - **智能 TCP buffer**：根据 Speedtest 上传带宽推荐缓存档位，并允许手动选择。
-- **可选 TCP Brutal v2**：按客户端 IP 为直连 TCP 配置总带宽，支持开机恢复、状态检查和规则清理；默认流程不安装、不启用。
+- **Lite 多协议管理**：勾选 VMess、SS2022、VLESS，选择 SNI，保留节点更新内核，支持卸载。
 - **原生 Argo VMess+WS**：使用 `cloudflared + Xray + Nginx + systemd`，不依赖 ArgoX 安装链。
 - **订阅输出**：生成 VMess URL、Base64、Clash、Shadowrocket、Auto 订阅。
 - **交互控制台**：主菜单、子菜单、返回上级、日志查看、诊断修复一体化。
@@ -155,9 +155,11 @@ speed
 1. Speed Slayer TCP+Argo 🚀
 2. 一键TCP调优
 3. 一键Vmess+Argo 节点生成
-4. 诊断与日志
-5. 修复/清理/卸载
-6. 更新
+4. 查看节点/订阅信息
+5. 诊断与日志
+6. 修复/清理/卸载
+7. 更新
+8. 多协议节点（Lite）
 0. 退出
 ```
 
@@ -181,7 +183,7 @@ speed --update-self    # 更新 speed 自身
 speed --all            # 完整流程：TCP 调优 + Argo 节点
 speed --force-all      # 等同 speed --all
 speed --tcp            # 单独执行 TCP 调优
-speed --brutal         # TCP Brutal 可选管理菜单（直连 TCP）
+speed --lite           # 多协议 Lite 菜单：创建、更新和卸载
 speed --optimize       # 等同 speed --tcp
 speed --argo           # 单独部署 Argo VMess+WS 节点
 speed --continue       # 根据续跑状态继续当前流程
@@ -285,151 +287,38 @@ SPEED_AUTO_SPEEDTEST=0 speed --tcp
 
 ---
 
-## Lite 一键部署：VLESS + XHTTP + REALITY
+## Lite 多协议一键管理
 
-Lite 的 VLESS 直连节点已改为 **XHTTP + REALITY**，同时部署 VMess + WS + Argo 和 SS2022。默认端口为 `30002/TCP`；新安装可指定 `REALITY_PORT=443`。完整说明见 [Lite README](speed-slayer-lite/README.md)。
+Lite 支持勾选创建 **VMess + WS + Argo、SS2022、VLESS + XHTTP + REALITY**，任意组合。未勾选的协议不创建；仅选择 VMess 时才安装 Argo。
 
-先将新版文件上传到 GitHub；以下命令在 Linux VPS 上以 root 执行。
-
-全新安装：
+新版文件上传 GitHub 后，在 Linux VPS 上以 root 执行：
 
 ```bash
 bash <(curl -fsSL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)
 ```
 
-已有 Lite TCP / Vision 节点，保留原端口与凭据切换为 XHTTP：
+运行后进入菜单：`1` 创建/勾选协议、`2` 查看链接、`3` 状态、`4` 更新脚本和内核、`5` 卸载、`6` 修复 Argo、`7` 旧 VLESS 迁移到 XHTTP、`0` 退出。安装后运行 `speed-slayer-lite` 再次打开菜单；旧版用户先运行上面的一键命令，选择 `4` 更新。
+
+勾选界面输入 `1 3` 可切换 VMess/VLESS 的选中状态，回车确认；`a` 全选、`n` 清空、`0` 取消。选 VLESS 后可以使用默认 SNI `learn.microsoft.com`，或输入自定义域名。SNI 同时用于目标站、守门规则和链接；不自动创建自建网站。
+
+新安装 VLESS 默认 `443/TCP`，可在提示中输入其他端口；已有节点更新保留原端口。默认域名按用户要求保留，实测新版 Xray 对 `learn.microsoft.com` 也会输出封锁风险提示，可选择自定义站点。使用 443 不能保证 IP 不被封锁。
+
+`update` 保留端口、协议、SNI、UUID、密钥和路径，下载仓库固定版本的内核并验证 SHA-256，经配置校验后切换；切换后失败时恢复旧内核与管理脚本。本版固定 Xray `26.10.21` / cloudflared `2026.10.3`，只更新已选协议需要的组件。更新会重启服务，Quick Tunnel 域名变化时需重新导入 VMess。卸载需要输入 `y` 确认，删除 Lite 服务、配置、凭据和备份，保留共享二进制及账户。
+
+主版菜单 `8` 或 `speed --lite` 也能打开 Lite；可以从根入口直接进入：
 
 ```bash
-bash <(curl -fsSL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh) migrate-xhttp
+bash <(curl -fsSL https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main/install.sh) --lite
 ```
 
-新安装使用 443 时，在安装命令前加 `REALITY_PORT=443`，放行 `443/TCP`，并确保无其他服务占用。迁移命令保持原端口，不会自动移到 443。迁移先备份和校验配置，再重启 Xray，失败时恢复；完成后必须重新导入 VLESS 链接，Quick Tunnel 域名变化时也重新导入 VMess 链接。
+详细参数、非交互安装、SNI、备份恢复和旧节点迁移见 [Lite README](speed-slayer-lite/README.md)。根目录入口未带 `--lite` 时仍进入 TCP 调优 / Argo 主版。
 
-客户端需支持 XHTTP + REALITY，传输选择 `xhttp`、模式 `auto`、Flow 留空，Path 使用生成链接中的值。此功能仍依赖客户端能直连 VPS IP，不保证换传输后避免封锁。
+### 上传 GitHub
 
-上传文件：`speed-slayer-lite/install.sh`、`speed-slayer-lite/test.sh`、新增 `speed-slayer-lite/test-xhttp.sh`、两份 README 与 CHANGELOG；原有共享 Brutal 文件继续保留。上传前检查 `bash speed-slayer-lite/test.sh`。根目录 `install.sh` 仍是主版的 TCP 调优 / VMess+Argo 入口；安装 XHTTP 使用上面的 **Lite 路径**。
+本次应同步提交：`scripts/vps-argo-vmess-oneclick.sh`、`speed-slayer-lite/install.sh`、三个 Lite 测试脚本、两份 README、`CHANGELOG.md`，以及 `scripts/tcp-brutal.sh`、`scripts/tests/tcp-brutal-test.sh` 的删除。旧 Brutal 名称只保留在历史记录中；新入口不再提供该功能。
 
----
-
-## TCP Brutal v2：可选直连 TCP 加速
-
-此功能由主版和 Lite 共用，**不会随 `--all`、`--tcp` 或 Lite 普通安装自动启用**。保留系统原来的 BBR/FQ 配置，不更改 Xray 协议配置、节点凭据或 cloudflared 传输方式。TCP Brutal 固定为 `v2.0.0`，下载 DKMS 源码包时验证固定 SHA-256。
-
-### 哪些节点适用
-
-| 场景 | 是否适用 |
-| --- | --- |
-| Lite：VLESS + XHTTP + REALITY | 可为 VPS 发往客户端的 TCP 流量启用 |
-| Lite：Shadowsocks 2022 | TCP 部分适用，UDP 部分不受影响 |
-| 主版 / Lite：VMess + Argo | 默认优先使用 QUIC，本功能不自动加速这段 UDP 隧道 |
-
-前提是 Debian/Ubuntu、systemd、**当前运行的 Linux 内核 >= 5.10**，并能安装匹配该内核的 headers 和加载 DKMS 模块。不强制安装 XanMod。管理器拒绝在容器内安装宿主机内核模块；受限 LXC/Docker 需要宿主机配合。已存在其他版本 Brutal 时，先由管理员处理版本切换，不会强制卸载活跃模块。
-
-### 安装与首次使用
-
-以下命令在 **Linux VPS 的 Bash 中以 root 执行**；普通用户先运行 `sudo -i`。
-
-已经安装新版主程序：
-
-```bash
-speed --brutal install
-```
-
-已经安装新版 Lite：
-
-```bash
-speed-slayer-lite brutal install
-```
-
-也可以直接从 GitHub 的主入口安装 Brutal 管理器，无需重新部署现有节点：
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main/install.sh) --brutal install
-```
-
-安装后会提供独立命令 `speed-brutal`。**只安装模块不会让连接自动使用 Brutal，需要继续添加客户端规则。**
-
-```bash
-# 示例 IP 必须替换为“客户端访问 VPS 时，VPS 看到的客户端公网 IP”
-# 100 代表发往这个客户端的所有 TCP 连接合计目标速率为 100 Mbps
-speed-brutal add 203.0.113.5 100
-
-# IPv6 示例，同样替换成真实客户端 IPv6
-speed-brutal add 2001:db8::5 100
-
-# 查看保存的规则、内核规则、连接数，以及路由是否生效
-speed-brutal status
-
-# 同一 IP 再次 add 即修改速率
-speed-brutal add 203.0.113.5 80
-```
-
-也可使用 `speed --brutal add IP Mbps` 或 `speed-slayer-lite brutal add IP Mbps`，两者操作同一份规则。主版菜单入口是 `2. 一键TCP调优 → 4. TCP Brutal 管理`。
-
-填写参数时注意：
-
-- 下载方向在 VPS 配置**客户端 IP**，不是 VPS 自己的 IP、REALITY 伪装站域名或 Argo 域名。本版只接受单个 IPv4/IPv6 地址（或 `/32`、`/128`），不接受整个网段或默认路由。
-- 按 VPS 到客户端的实际可用带宽填写 Mbps，支持整数 `1–100000`。不自动套用 `SPEED_BANDWIDTH_MBPS` 或 VPS Speedtest 上传结果。设得过高可能增加丢包、排队和带宽消耗，不保证一定优于 BBR。
-- 规则覆盖 VPS 发往该 IP 的**所有 TCP 连接**，包括其他应用。同一公网 IP 后的多个用户会共享速率；移动网络、家庭宽带或 IPv6 隐私地址变化后，需要删除旧 IP 并添加新 IP。
-- 首次添加规则后，需要在客户端断开并重新建立连接。修改已有规则的速率会作用于该组已有连接；删除规则后，已有连接仍保持原来的 Brutal 参数直到关闭。
-- 添加前检查现有目标路由和策略路由；遇到冲突会拒绝覆盖。复杂路由请自行使用上游工具管理，不能与本管理器同时修改同一目标规则。
-
-### 停用、删除与卸载
-
-```bash
-speed-brutal del 203.0.113.5  # 删除一条自有规则和持久配置
-speed-brutal disable          # 清除全部自有规则并关闭开机恢复，保留备份
-speed-brutal uninstall        # 停用并移除共享管理器；保留 DKMS 模块、brutalctl 和备份
-```
-
-`disable` 后需要重新 `add` 才会启用。清理只针对本管理器记录的目标，不执行 `brutalctl flush`，避免删除其他工具的规则。若清理失败，会返回失败并保留相应记录，修复环境后重新执行 `del` 或 `disable`。
-
-Brutal 管理器由主版和 Lite 共享，**卸载主版或 Lite 不会连带移除它**。如需一起停用，先执行 `speed-brutal disable`。共享内核模块不会被自动卸载，以免影响其他支持 Brutal 的应用。
-
-### 文件、开机恢复与排查
-
-| 路径 | 用途 |
-| --- | --- |
-| `/etc/speed-slayer-brutal/rules.tsv` | 本管理器拥有的 IP / Mbps 规则，权限 `0600`，作为数据读取，不执行内容 |
-| `/etc/speed-slayer-brutal/rules.tsv.bak` | 最近一次修改前的规则备份 |
-| `/etc/speed-slayer-brutal/disabled-rules.tsv` | 最近一次停用操作前的规则备份 |
-| `/usr/local/lib/speed-slayer/tcp-brutal.sh` | 主版和 Lite 共用的管理脚本 |
-| `/etc/systemd/system/speed-slayer-brutal.service` | 网络就绪后恢复持久规则；添加第一条规则时启用 |
-
-```bash
-speed-brutal status
-journalctl -u speed-slayer-brutal --no-pager -n 100
-dkms status
-```
-
-内核升级后由 DKMS 构建模块，但仍取决于新内核的 headers、模块兼容性和加载权限；重启后检查 `status`。若开机恢复失败，修复后执行 `speed-brutal restore` 并重新建立客户端连接。`status` 中有规则但连接数为 0，不代表下载已加速，应在真实连接中验证。
-
-实现依据：[TCP Brutal v2.0.0](https://github.com/HyNetworks/tcp-brutal/releases/tag/v2.0.0)、[上游说明](https://github.com/HyNetworks/tcp-brutal/blob/v2.0.0/README.zh.md)、[Cloudflare Tunnel 协议参数](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/#protocol)。
-
-### 上传 GitHub 时需要保留的文件
-
-按仓库现有目录结构上传，建议在同一个 Git 提交中发布，不能只上传主入口：
-
-- `install.sh` 和 `scripts/vps-argo-vmess-oneclick.sh`：主版安装入口与 `--brutal` 命令。
-- **`scripts/tcp-brutal.sh`**：两个入口需要下载的共享模块，缺少此文件会安装失败。
-- `speed-slayer-lite/install.sh`：Lite 的 `brutal` 命令。
-- `README.md`、`speed-slayer-lite/README.md`、`CHANGELOG.md`、`AGENTS.md`：用法与修改记录。
-- `scripts/tests/tcp-brutal-test.sh`、`speed-slayer-lite/test.sh`、`.gitattributes`：检查脚本与 LF 换行约定。
-
-文档中的远程命令以 **`Benjpsusu/speed-slayer` 仓库的 `main` 分支**为准，必须在这些文件上传之后使用。上传前可在 Linux 的本地仓库测试入口：
-
-```bash
-bash scripts/tcp-brutal.sh help
-bash scripts/tests/tcp-brutal-test.sh
-bash speed-slayer-lite/test.sh
-
-# 下面这条会在当前 Linux VPS 真正安装模块；仅在准备好实机验证时执行
-bash scripts/vps-argo-vmess-oneclick.sh --brutal install
-```
-
-两个入口固定校验共享脚本的 SHA-256。后续修改 `scripts/tcp-brutal.sh` 时，要先保持 UTF-8/LF，再同步更新两个入口中 `run_brutal` 的摘要；否则远程下载会因校验不符而停止。
+在仓库根目录使用 `git add -A` 可以一起暂存新增、修改和删除。上传前运行 `bash speed-slayer-lite/test.sh`；测试通过后再提交并推送到 GitHub `main`，VPS 的一键命令才能下载新版本。
 
 ---
 
@@ -584,7 +473,13 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 
 ## 版本
 
-当前脚本版本：`v2.0.9`
+当前脚本版本：`v2.1.0`
+
+### v2.1.0
+
+- 移除 TCP Brutal 的功能模块、测试和主版/Lite 入口。
+- Lite 新增协议勾选、默认/自定义 SNI、更新及卸载菜单；主版通过 `--lite` 或菜单 8 进入。
+- 新安装 VLESS 默认 TCP 443；更新保留旧节点配置和凭据，固定并验证内核版本。
 
 ### v2.0.9
 
@@ -595,6 +490,33 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 ## 修改记录（溯源）
 
 后续每次修改都应追加记录，包含日期、目的、文件和验证情况；具体约定见 [AGENTS.md](AGENTS.md)。历史记录不得覆盖，尚未运行的检查不得标记为通过。
+
+### 2026-10-26 — v2.1.0：移除 Brutal，增加多协议交互和保留配置更新
+
+- **目的**：按用户要求删除 Brutal，安装时勾选协议，VLESS 可选择默认 `learn.microsoft.com` 或自定义 SNI，一键命令提供更新与卸载。
+- **协议与交互**：Lite 默认显示菜单，编号切换 `[ ]`/`[x]`、回车确认。只生成所选协议的入站、凭据及链接，仅选 VMess 时安装和启动 cloudflared。自定义 SNI 同步 REALITY 目标、守门规则和客户端链接；新安装默认 443，可输入其他端口，更新不改旧端口。
+- **更新与卸载**：新增 `update`，下载仓库管理脚本、使用其固定版本/摘要，备份后校验候选内核，切换并重启，失败时恢复旧内核和脚本；配置、协议、SNI、UUID、密钥、路径保持原样。旧 state 缺少协议标记时兼容全部三种。卸载默认取消，确认后仅删除 Lite 服务、配置、凭据和本目录备份，保留共享二进制与系统账户。
+- **文件**：修改 `scripts/vps-argo-vmess-oneclick.sh`（v2.1.0、`--lite`、菜单 8）、`speed-slayer-lite/install.sh`、`speed-slayer-lite/test.sh`、两份 README 和 CHANGELOG；新增 `speed-slayer-lite/test-manage.sh`；删除 `scripts/tcp-brutal.sh` 与 `scripts/tests/tcp-brutal-test.sh`。Brutal 的历史记录保留；本次不清理其他机器上过去独立安装的模块或规则。
+- **版本来源**：固定官方 [Xray 26.10.21](https://github.com/XTLS/Xray-core/releases/tag/v26.10.21) 和 [cloudflared 2026.10.3](https://github.com/cloudflare/cloudflared/releases/tag/2026.10.3)。已实际下载两者 Linux amd64/arm64 共四份发布文件，SHA-256 均与脚本固定值和 GitHub Release 元数据一致。
+- **验证**：6 个相关 Bash 文件语法检查、主版帮助入口和 Git 空白检查通过。原有 Lite 自检、13 项 XHTTP 隔离检查、23 项新增管理检查通过，使用真实 Windows Xray `26.10.21` 校验服务端、客户端和候选配置；覆盖七种协议组合、默认/自定义 SNI、仅检查所选端口、旧状态兼容、重复更新、下载/配置/组件校验失败、重启/运行状态/节点信息/隧道域名失败后的恢复、卸载默认取消及清理范围、VLESS 单独新装。下载和 systemd 使用替身，四份真实 Linux 发布文件另行验证摘要及 Xray 归档结构。
+- **未验证**：未在用户 VPS 执行本版真实安装、更新、卸载或更换运行中的内核；Linux systemd、Linux ARM64 新内核联网及长期稳定性尚未实测。已完成的本地测试不等同于生产升级。
+
+### 2026-10-26 — Xray 26.10.21 升级兼容性评估
+
+- **目的**：核对现有固定版本 `26.3.27` 与新版的兼容性，评估 VMess/WS、SS2022 和 XHTTP + REALITY 是否还能加载。
+- **上游信息**：截至本次检查，[官方 Latest 为 v26.10.21](https://github.com/XTLS/Xray-core/releases/tag/v26.10.21)，发布于 2026-10-21，GitHub API 标记 `prerelease=false`。发布说明包含证书信任链相关紧急安全更新，建议尽快升级；完整累计变更说明尚待上游补充。该版本源码仍保留本脚本使用的 VMess、WebSocket、SS2022 和旧 `clients` 字段兼容。
+- **实际检查**：下载官方 Windows amd64 发布包并核对 GitHub Release API 提供的 SHA-256：`fc58c39ee2f2717b4c54d28d374362389e5319b20ae44aea76ea45a5243ec827`。以真实 `26.10.21` 内核运行 `speed-slayer-lite/test-xhttp.sh`，13 项检查通过，包括完整服务端配置、链接重建的 XHTTP 客户端配置、迁移候选的 `run -test`，以及模拟服务失败时的恢复。
+- **涉及文件与边界**：更新本 README 和 Lite README 的评估记录；未修改安装脚本的版本或摘要，未替换 VPS 正在运行的内核。Lite 不自动跟随上游版本，目前也没有独立的内核升级命令；`migrate-xhttp` 只负责配置迁移，不能代替内核升级。
+- **后续升级要求**：更新脚本时需同步固定版本与 Linux amd64/arm64 发布包摘要；已有 VPS 应先备份内核和配置，用候选内核校验，再替换、重启并验证三种节点，失败时恢复。当前 `PartOf=xray-lite.service` 会令 Argo 随 Xray 重启，Quick Tunnel 域名可能变化，届时需刷新并重新导入 VMess 链接。
+- **未验证**：新版 Linux ARM64 在该 VPS 上的实际启动、三协议联网、客户端版本交互及长期稳定性；本地配置与隔离检查通过不等于已完成生产升级。
+
+### 2026-10-26 — 修复 VMess 因服务器时间漂移而无法连接
+
+- **目的与原因**：排查 Lite 中其他节点可用、只有 VMess 不通的问题。Xray 日志明确报 `invalid user > invalid timestamp, perhaps unsynchronized time`；服务器未安装运行中的 NTP 服务，分别与 Oracle、Cloudflare、Google NTP 比对，UTC 时间慢约 139.4 秒。VMess 的 UUID、WebSocket 路径与导出链接一致，Argo 隧道已正常注册。
+- **服务器操作**：从 Debian 已配置的软件源安装 `chrony`，启用服务及开机启动，恢复自动校时；未重启 Xray/cloudflared，未改动节点凭据、端口或 Quick Tunnel 域名。诊断和修复记录保存在服务器 `/etc/speed-slayer-lite/diagnostics/20261026-vmess-time.txt`，权限 `0600`。
+- **涉及文件**：本 README、`speed-slayer-lite/README.md`，新增时间同步排查说明；服务器新增 chrony 软件包及其默认配置。本次未修改安装脚本，不会使以后新装的 VPS 自动获得 NTP 服务。
+- **验证**：`timedatectl` 显示 `NTP=yes`、`NTPSynchronized=yes`，`chronyc tracking` 显示 `Leap status: Normal`。用现有 VMess 分享链接构造临时 Xray 客户端，经过 Cloudflare Tunnel 请求两个 HTTPS 测试地址，分别得到 HTTP 204 和 200，出口 IP 与服务器一致；临时客户端和测试文件随后清理。用户重新连接原节点后确认恢复正常。
+- **未验证**：VPS 重启后的持续校时与长期漂移；本次通过的是当前连接及当前时间同步状态，不代表已进行长期稳定性测试。其他历史验证记录保持原样。
 
 ### 2026-10-26 — Lite 直连节点切换为 XHTTP + REALITY
 
