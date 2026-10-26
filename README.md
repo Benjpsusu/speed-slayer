@@ -312,6 +312,10 @@ bash <(curl -fsSL --proto '=https' --tlsv1.2 \
 bash <(curl -fsSL https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main/install.sh) --lite
 ```
 
+VMess 正常但 VLESS 握手失败时，还需检查客户端启动日志中的 Xray 内核版本；服务器升级不会更新电脑端。本次同配置对照中，客户端 `25.1.30` 报 `REALITY: processed invalid connection`，`26.10.21` 联网通过。排查步骤见 [Lite 客户端兼容性说明](speed-slayer-lite/README.md#vless-单独不通检查客户端内核)。
+
+用户于 2026-10-26 确认：将 v2rayN 从 `7.7.1` 升级到 **`7.25.6` 后，VLESS 已恢复正常连接**。官方项目：[2dust/v2rayN](https://github.com/2dust/v2rayN)；对应版本：[7.25.6 发布页](https://github.com/2dust/v2rayN/releases/tag/7.25.6)。升级后实际 Xray 内核版本未另行提供，不将界面版本等同于内核版本。
+
 详细参数、非交互安装、SNI、备份恢复和旧节点迁移见 [Lite README](speed-slayer-lite/README.md)。根目录入口未带 `--lite` 时仍进入 TCP 调优 / Argo 主版。
 
 ### 上传 GitHub
@@ -490,6 +494,22 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 ## 修改记录（溯源）
 
 后续每次修改都应追加记录，包含日期、目的、文件和验证情况；具体约定见 [AGENTS.md](AGENTS.md)。历史记录不得覆盖，尚未运行的检查不得标记为通过。
+
+### 2026-10-26 — 用户确认升级 v2rayN 7.25.6 后 VLESS 恢复
+
+- **目的与结果**：补全前一条 VLESS 排查记录的用户端验证结果。用户原用 v2rayN `7.7.1`、Xray `25.1.30`，VMess 正常而 VLESS 不通；用户升级 v2rayN 至 **`7.25.6` 后明确确认 VLESS 已通**。此前“尚待确认”是排查当时的状态，保留用于溯源。
+- **官方来源**：[2dust/v2rayN 项目](https://github.com/2dust/v2rayN)、[7.25.6 发布页](https://github.com/2dust/v2rayN/releases/tag/7.25.6)。客户端升级与服务端升级需要分别处理。
+- **涉及文件**：本 README 与 `speed-slayer-lite/README.md`，在用法和修改记录中补充恢复确认及官方链接。本次只修改文档，未操作服务器或修改安装脚本。
+- **验证与边界**：恢复结果来自用户实际重连确认；此前同配置 Xray `25.1.30` 失败、`26.10.21` 通过的独立测试仍保留。用户未提供升级后的内核版本，不将 v2rayN `7.25.6` 推断为某个固定 Xray 版本。文档差异及 UTF-8/LF 检查通过；未重跑运行时测试，未验证长期稳定性或其他客户端组合。
+
+### 2026-10-26 — VLESS XHTTP 旧客户端内核握手失败排查
+
+- **目的**：排查 VMess 正常、VLESS 不通。用户客户端界面为 v2rayN `7.7.1`，日志显示实际内核为 Xray `25.1.30`；VPS 已运行 `26.10.21`，VLESS 使用旧安装保留的 `30002/TCP`、XHTTP + REALITY 与 `learn.microsoft.com`。
+- **检查**：Xray/Argo 服务正常、NTP 已同步、本机防火墙未阻断；分享链接中的 UUID、端口、公钥、short ID、Path 与服务端一致，目标站 TLS 1.3 / h2 协商成功。服务器内临时客户端访问 HTTPS 测试地址得到 204/200。
+- **版本对照**：同一 Windows 环境、同一当前链接、同一物理网卡出口，Xray `25.1.30` 的两次 HTTPS 请求均失败，日志为 `REALITY: processed invalid connection`；只替换临时测试内核为 `26.10.21` 后得到 gstatic HTTP 204、Cloudflare HTTP 200，出口与该 VPS 的 IPv6 一致。旧版官方归档已核对 SHA-256，新版使用此前校验过的官方二进制。该结果针对本次节点组合，不推断所有旧版 REALITY 节点均不可用。
+- **测试边界**：初始默认路由经过另一 TUN 代理时超时，最终对照仅给临时测试连接绑定物理网卡，未修改系统路由或用户代理设置。Windows curl 另遇离线证书吊销查询错误，最终两版本统一使用启用证书与主机名验证的 Python ssl 完成对照。
+- **涉及文件与操作**：只更新两份 README，补充客户端内核版本排查说明；VPS 写入权限 `0600` 的 `/etc/speed-slayer-lite/diagnostics/20261026-vless-client-compatibility.txt`。未修改 VPS 配置、节点凭据或已安装内核，未重启 Xray/Argo，临时测试进程与含凭据配置已清理。
+- **处理建议与未验证项**：客户端更新 Xray、确认启动日志为 `26.10.21`，迁移后重新导入当前 XHTTP 链接；服务器更新命令不会更新电脑端。用户自己的客户端更新及恢复情况尚待确认，未验证长期稳定性。
 
 ### 2026-10-26 — v2.1.0：移除 Brutal，增加多协议交互和保留配置更新
 

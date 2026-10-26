@@ -150,6 +150,21 @@ bash <(curl -fsSL --proto '=https' --tlsv1.2 \
 
 客户端需要支持 XHTTP + REALITY：传输 `xhttp`、模式 `auto`、Flow 留空，Path/SNI/公钥/short ID 均使用生成链接中的值。
 
+## VLESS 单独不通：检查客户端内核
+
+v2rayN 的界面版本与实际 Xray 内核版本是两回事，应查看启动日志中的 `Xray ...`。VPS 上执行 `speed-slayer-lite update` 只更新服务器，不会更新电脑客户端。
+
+2026-10-26 实测：服务器 Xray `26.10.21`，同一 XHTTP + REALITY 链接、同一网络线路下，客户端 `25.1.30` 报 `REALITY: processed invalid connection`，替换为 `26.10.21` 后两个 HTTPS 请求分别返回 204/200。这是当前组合的验证结果，不是所有旧版节点的通用结论。
+
+用户于 2026-10-26 确认：将 v2rayN 从 `7.7.1` 升级到 **`7.25.6` 后，VLESS 已恢复正常连接**。官方项目：[2dust/v2rayN](https://github.com/2dust/v2rayN)；对应版本：[7.25.6 发布页](https://github.com/2dust/v2rayN/releases/tag/7.25.6)。升级后实际 Xray 内核版本未另行提供，不将界面版本等同于内核版本。
+
+1. 在 v2rayN 的“检查更新”中更新 **Xray 内核**，重启后确认日志显示 `26.10.21`（本次验证版本）。旧客户端无法更新时，从 [v2rayN 官方发布页](https://github.com/2dust/v2rayN/releases/latest) 获取适合系统的新版，保留旧目录作为备份；安装后仍应确认并更新内核版本。
+2. 在 VPS 执行 `speed-slayer-lite show`，重新导入当前 VLESS 链接，尤其是刚从 TCP/Vision 迁移到 XHTTP 的节点。核对 `type=xhttp`、`mode=auto`、Flow 留空，以及端口、Path、SNI、公钥和 short ID。
+3. 确认测试连接没有经过另一个代理或 TUN。此类叠加可能使测试超时，应区分代理路径与直连路径；不要仅凭一次 TCP 端口测试判定 VLESS 已可用。
+4. 若仍不通，保留实际连接错误日志，检查 VPS 的监听、防火墙/云安全组和服务端日志。单独的“测试完成”并不能说明连接成功或定位原因。
+
+v2rayN `7.7.1` 的[官方链接解析代码](https://github.com/2dust/v2rayN/blob/7.7.1/v2rayN/ServiceLib/Handler/Fmt/BaseFmt.cs)已支持 XHTTP；不能仅凭界面版本断言不支持该传输。本次没有为了排查而改动服务端端口、SNI、密钥或重启现有服务。
+
 ## 验证与维护
 
 在仓库内运行：
@@ -195,6 +210,19 @@ sudo timedatectl status
 Quick Tunnel 适合测试，域名可能随重启变化。需要稳定域名时使用命名 Tunnel；参考 [Quick Tunnels 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)。
 
 ## 修改记录（溯源）
+
+### 2026-10-26 — 用户确认 v2rayN 7.25.6 恢复 VLESS
+
+- 用户将 v2rayN 从 `7.7.1` 升级到 **`7.25.6` 后确认 VLESS 已恢复正常连接**，补全上一条排查记录中的待确认结果；原排查历史保留。
+- 官方项目：[2dust/v2rayN](https://github.com/2dust/v2rayN)；对应版本：[7.25.6](https://github.com/2dust/v2rayN/releases/tag/7.25.6)。客户端内核与界面版本需分别核对，升级后实际内核版本未另行提供。
+- 两份 README 的用法与溯源记录已同步。本次仅修改文档，未操作服务器或修改安装脚本；文档差异与 UTF-8/LF 检查通过，未重跑运行时测试。当前恢复由用户实测确认，长期稳定性及其他版本组合未验证。
+
+### 2026-10-26 — VLESS 旧客户端内核握手失败对照
+
+- 排查 VMess 可用、VLESS 不通：VPS 为 Xray `26.10.21`，客户端日志显示 `25.1.30`。服务、NTP、端口与链接参数均已核对；服务器本机 VLESS 两次 HTTPS 请求通过。
+- 同配置、同物理网卡的外部测试中，客户端 `25.1.30` 报 `REALITY: processed invalid connection`；只换临时内核为 `26.10.21` 后返回 HTTP 204/200，出口与 VPS 一致。最终对照使用 Python ssl 验证证书和主机名，并排除另一 TUN 代理与 Windows curl 吊销查询对结果的干扰。
+- 两份 README 新增内核检查、更新及迁移后重导链接的说明；服务器保存 `diagnostics/20261026-vless-client-compatibility.txt`，权限 `0600`。未修改安装脚本、VPS 配置、凭据或运行中的内核，未重启 Xray/Argo；临时测试进程与含凭据配置已清理。
+- 建议客户端更新并确认 Xray `26.10.21`；用户自己的客户端恢复尚待确认，长期稳定性未验证。完整过程及边界见根 README。
 
 ### 2026-10-26 — 协议勾选、SNI 选择、更新卸载菜单，移除 Brutal
 
