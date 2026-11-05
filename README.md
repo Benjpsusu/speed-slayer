@@ -38,7 +38,7 @@
 - **XanMod / BBR v3**：自动检测内核状态，安装内核组件，并支持重启后续跑。
 - **容器降级模式**：容器环境不强装宿主机内核，只应用容器内可生效配置。
 - **智能 TCP buffer**：根据 Speedtest 上传带宽推荐缓存档位，并允许手动选择。
-- **Lite 多协议管理**：勾选 VMess、SS2022、VLESS，选择 SNI，保留节点更新内核，支持卸载。
+- **Lite 多协议管理**：勾选 VMess、SS2022、VLESS、AnyTLS，选择 SNI/证书，支持保留节点更新、追加 AnyTLS 和卸载。
 - **原生 Argo VMess+WS**：使用 `cloudflared + Xray + Nginx + systemd`，不依赖 ArgoX 安装链。
 - **订阅输出**：生成 VMess URL、Base64、Clash、Shadowrocket、Auto 订阅。
 - **交互控制台**：主菜单、子菜单、返回上级、日志查看、诊断修复一体化。
@@ -289,7 +289,7 @@ SPEED_AUTO_SPEEDTEST=0 speed --tcp
 
 ## Lite 多协议一键管理
 
-Lite 支持勾选创建 **VMess + WS + Argo、SS2022、VLESS + XHTTP + REALITY**，任意组合。未勾选的协议不创建；仅选择 VMess 时才安装 Argo。
+Lite 支持勾选创建 **VMess + WS + Argo、SS2022、VLESS + XHTTP + REALITY、AnyTLS + TLS**，任意组合。未勾选的协议不创建；仅选择 VMess 时才安装 Argo。
 
 新版文件上传 GitHub 后，在 Linux VPS 上以 root 执行：
 
@@ -298,13 +298,13 @@ bash <(curl -fsSL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)
 ```
 
-运行后进入菜单：`1` 创建/勾选协议、`2` 查看链接、`3` 状态、`4` 更新脚本和内核、`5` 卸载、`6` 修复 Argo、`7` 旧 VLESS 迁移到 XHTTP、`0` 退出。安装后运行 `speed-slayer-lite` 再次打开菜单；旧版用户先运行上面的一键命令，选择 `4` 更新。
+运行后进入菜单：`1` 创建/勾选协议、`2` 查看链接、`3` 状态、`4` 更新脚本和内核、`5` 卸载、`6` 修复 Argo、`7` 旧 VLESS 迁移到 XHTTP、`8` 追加 AnyTLS、`9` 刷新 AnyTLS 已有证书、`0` 退出。安装后运行 `speed-slayer-lite` 再次打开菜单；旧版用户先运行上面的一键命令，选择 `4` 更新。
 
 勾选界面输入 `1 3` 可切换 VMess/VLESS 的选中状态，回车确认；`a` 全选、`n` 清空、`0` 取消。选 VLESS 后可以使用默认 SNI `learn.microsoft.com`，或输入自定义域名。SNI 同时用于目标站、守门规则和链接；不自动创建自建网站。
 
 新安装 VLESS 默认 `443/TCP`，可在提示中输入其他端口；已有节点更新保留原端口。默认域名按用户要求保留，实测新版 Xray 对 `learn.microsoft.com` 也会输出封锁风险提示，可选择自定义站点。使用 443 不能保证 IP 不被封锁。
 
-`update` 保留端口、协议、SNI、UUID、密钥和路径，下载仓库固定版本的内核并验证 SHA-256，经配置校验后切换；切换后失败时恢复旧内核与管理脚本。本版固定 Xray `26.10.21` / cloudflared `2026.10.3`，只更新已选协议需要的组件。更新会重启服务，Quick Tunnel 域名变化时需重新导入 VMess。卸载需要输入 `y` 确认，删除 Lite 服务、配置、凭据和备份，保留共享二进制及账户。
+`update` 保留端口、协议、SNI、UUID、密钥和路径，下载仓库固定版本的内核并验证 SHA-256，经配置校验后切换；切换后失败时恢复旧内核与管理脚本。本版固定 Xray `26.10.21` / cloudflared `2026.10.3` / sing-box `1.14.4`，只更新已选协议需要的组件。更新会重启服务，Quick Tunnel 域名变化时需重新导入 VMess。卸载需要输入 `y` 确认，删除 Lite 服务、配置、凭据和备份，保留共享二进制及账户。
 
 主版菜单 `8` 或 `speed --lite` 也能打开 Lite；可以从根入口直接进入：
 
@@ -318,11 +318,34 @@ VMess 正常但 VLESS 握手失败时，还需检查客户端启动日志中的 
 
 详细参数、非交互安装、SNI、备份恢复和旧节点迁移见 [Lite README](speed-slayer-lite/README.md)。根目录入口未带 `--lite` 时仍进入 TCP 调优 / Argo 主版。
 
+AnyTLS 新装在菜单 `1` 中勾选协议 `4`；**已有 Lite 节点直接选菜单 `8` 追加，无需卸载或更新原 Xray**。上传新版后使用上面的 GitHub 一键命令即可进入新菜单，追加成功会安装新版管理命令。脚本自动识别 Linux、amd64/arm64，为 AnyTLS 部署独立 `sing-box 1.14.4`，保留已有代理程序；不更换 Linux 内核。
+
+需要准备：自己的子域名（仅 DNS 解析到 VPS）、可用 TCP 端口，以及证书申请方式。交互安装优先提示 443；443 已占用或本次 VLESS 使用 443 时提示 8443，允许输入其他端口，冲突时停止。SNI 使用自己的证书域名，不能沿用 REALITY 的第三方域名。选择自动证书时填写邮箱，并保持域名正确解析、TCP 80 空闲且对公网开放；选择已有证书时填写完整链与私钥的绝对路径。密码随机生成，输出 `anytls://` 链接，默认验证证书。
+
+AnyTLS 的版本、架构选择、证书续期、已有节点追加及非交互参数，见 [Lite AnyTLS 用法](speed-slayer-lite/README.md#anytls-安装与证书)。v2rayN 使用支持 AnyTLS 的 sing-box 内核；只更新 Xray 不会增加 AnyTLS 支持。
+
 ### 上传 GitHub
 
-本次应同步提交：`scripts/vps-argo-vmess-oneclick.sh`、`speed-slayer-lite/install.sh`、三个 Lite 测试脚本、两份 README、`CHANGELOG.md`，以及 `scripts/tcp-brutal.sh`、`scripts/tests/tcp-brutal-test.sh` 的删除。旧 Brutal 名称只保留在历史记录中；新入口不再提供该功能。
+本次应同步提交：主版脚本、`speed-slayer-lite/install.sh`、Lite 测试入口、新增 `test-anytls.sh` / `test-anytls-loopback.py`、两份 README 和 `CHANGELOG.md`。旧修改记录保留。
 
 在仓库根目录使用 `git add -A` 可以一起暂存新增、修改和删除。上传前运行 `bash speed-slayer-lite/test.sh`；测试通过后再提交并推送到 GitHub `main`，VPS 的一键命令才能下载新版本。
+
+在 Windows **PowerShell 7** 中整段执行（工作目录按实际位置调整）：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+Set-Location 'C:\CC\work\speed-slayer'
+& {
+    git add -A
+    if ($LASTEXITCODE -ne 0) { throw '暂存失败，已停止上传' }
+    git commit -m 'feat: add AnyTLS with managed sing-box and TLS certificates'
+    if ($LASTEXITCODE -ne 0) { throw '提交失败，已停止上传；请查看上方错误' }
+    git push origin main
+    if ($LASTEXITCODE -ne 0) { throw '推送失败，请查看上方错误' }
+}
+```
+
+若提交提示 `Author identity unknown`，先用 `git config user.name '你的名字'` 和 `git config user.email '你的 GitHub 邮箱或隐私邮箱'` 设置当前仓库身份，再重新执行。提交失败时不会继续推送；`Everything up-to-date` 不能证明未提交的文件已经上传。
 
 ---
 
@@ -477,7 +500,12 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 
 ## 版本
 
-当前脚本版本：`v2.1.0`
+当前脚本版本：`v2.2.0`
+
+### v2.2.0
+
+- Lite 新增 AnyTLS 协议勾选、已有节点追加、可信证书管理及更新失败恢复。
+- 自动选择 Linux amd64/arm64 的独立 sing-box，保留原有 Xray 和共享程序。
 
 ### v2.1.0
 
@@ -492,6 +520,16 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 - 新增用法、GitHub 上传说明及修改溯源约定。
 
 ## 修改记录（溯源）
+
+### 2026-11-05 — 接入 AnyTLS、独立 sing-box 与可信证书管理（v2.2.0）
+
+- **目的与分析**：审阅 [anytls/anytls-go](https://github.com/anytls/anytls-go) 提交 `fd6167acd6d73b9fa3e607659951847fbc9e6c50`。它是协议参考实现，示例服务器使用自签证书；按用户确认的方案采用兼容的 sing-box 管理正式 TLS 证书，保留现有 Xray 节点。完整协议分析、输入要求与来源见 Lite README。
+- **系统与版本**：识别 Linux、amd64/arm64，沿用 Debian 11+ / Ubuntu 20.04+、systemd 支持范围；输出 Linux 内核版本，不更换系统内核。固定 sing-box `1.14.4`，安装到 Lite 自有目录，不覆盖已有 sing-box；原 Xray `26.10.21` / cloudflared `2026.10.3` 固定版本不变。Linux amd64 包 SHA-256 为 `699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968`，arm64 为 `436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26`。
+- **创建与证书**：协议勾选增加第 4 项 AnyTLS，可与原三种协议组合，也可独立安装。使用自己的域名作为 SNI，支持 ACME HTTP-01 自动申请/续期或复制已有可信证书；检查端口、域名、有效期和私钥匹配，启动后验证系统信任链。交互默认提示空闲 443，否则 8443；密码随机生成，分享链接启用证书校验。自动证书需域名直指本机、公网 TCP 80 可达且可供签发/续期使用。
+- **已有节点与维护**：菜单 8 / `add-anytls` 保留旧配置和凭据追加，不重启 Xray/Argo；菜单 9 / `refresh-anytls-cert` 用于外部证书续期后的副本刷新。维护操作加锁；更新仅处理所选组件，备份后校验候选，失败恢复旧程序和管理脚本。追加失败恢复原 state/链接；新安装失败清理 Lite 文件。卸载删除自有服务、程序及证书副本/ACME 数据，保留外部源证书和共享程序；ACME 正常续期的数据不随程序回滚倒退。
+- **涉及文件**：`speed-slayer-lite/install.sh`、测试入口 `test.sh`、新增 `test-anytls.sh` / `test-anytls-loopback.py`，主版 `scripts/vps-argo-vmess-oneclick.sh` 的版本与菜单，两份 README 和 `CHANGELOG.md`。README 补充安装、追加、证书续期、客户端内核、更新/卸载及 PowerShell 7 GitHub 上传命令，原历史记录完整保留。
+- **验证**：7 个相关 Bash 文件语法、主版帮助入口、Python 语法、UTF-8/LF 和 Git 空白检查通过。Lite 自检及 **13 项 XHTTP + 23 项原管理 + 29 项 AnyTLS 检查（共 65 项）通过**；配置使用真实 Windows Xray `26.10.21` / sing-box `1.14.4` 校验。覆盖包含 AnyTLS 的八种组合、ACME 配置、端口冲突、证书输入、重复追加/维护锁、下载/配置/启动/TLS/节点信息失败恢复、证书刷新、旧节点保留和卸载范围。真实 sing-box 本机回环完成受信 TLS 下的 HTTP 代理请求，并拒绝错误密码、错误 SNI 和不受信证书。实际下载核对 Linux 两种架构和 Windows amd64 发布包摘要，Linux 归档成员及 ELF 架构检查通过。
+- **未验证与边界**：包管理、下载故障注入和 systemd 在生命周期测试中使用替身；未在 VPS 执行本版安装/追加/更新/卸载，未实测 Linux 服务权限与低端口绑定、公网 ACME 签发/自动续期、ARM64 运行、v2rayN 的实际 AnyTLS 导入或长期网络表现。没有修改用户 VPS、防火墙、DNS 或现有节点；本次本地检查不等同于生产部署或抗封锁保证。
 
 后续每次修改都应追加记录，包含日期、目的、文件和验证情况；具体约定见 [AGENTS.md](AGENTS.md)。历史记录不得覆盖，尚未运行的检查不得标记为通过。
 

@@ -37,3 +37,4 @@ assert_eq "$(quick_domain)" ''
 printf 'speed-slayer-lite self-check passed\n'
 bash "$TEST_DIR/test-xhttp.sh"
 bash "$TEST_DIR/test-manage.sh"
+bash "$TEST_DIR/test-anytls.sh"

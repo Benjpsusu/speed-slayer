@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v2.2.0 - 2026-11-05
+
+- Lite 新增 AnyTLS 协议勾选和独立 sing-box 服务；自动选择 Linux amd64/arm64 包并核对 SHA-256，固定 sing-box 1.14.4，保留原 Xray/cloudflared 版本。
+- 支持 ACME HTTP-01 自动申请/续期、已有可信证书及验证失败恢复；输出开启证书校验的 `anytls://` 链接。
+- 新增菜单 8 / `add-anytls`，保留已有节点追加 AnyTLS；菜单 9 / `refresh-anytls-cert` 刷新外部续期的证书副本。
+- 更新、备份、状态与卸载按所选协议处理；AnyTLS 使用自有二进制，不覆盖已有 sing-box；卸载保留共享程序和外部源证书。
+- 新增隔离管理与真实 AnyTLS 本机连接测试；验证结果、运行边界及未验证项见两份 README 当日记录。
+
 ## v2.1.0 - 2026-10-26
 
 - 删除 TCP Brutal 模块、测试、主版和 Lite 入口；历史修改记录保留。

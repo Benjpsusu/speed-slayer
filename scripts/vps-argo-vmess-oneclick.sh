@@ -7,7 +7,7 @@ set -euo pipefail
 # - Argo VMess+WS: native cloudflared + Xray + Nginx implementation, no ArgoX install chain.
 
 REPO_RAW_BASE="https://raw.githubusercontent.com/Benjpsusu/speed-slayer/main"
-SPEED_SLAYER_VERSION="v2.1.0"
+SPEED_SLAYER_VERSION="v2.2.0"
 PROJECT_URL="https://github.com/Benjpsusu/speed-slayer"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo .)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd 2>/dev/null || echo .)"
@@ -2160,7 +2160,7 @@ menu_body() {
   5. 诊断与日志
   6. 修复/清理/卸载
   7. 更新
-  8. 多协议节点（Lite：VMess / SS2022 / VLESS）
+  8. 多协议节点（Lite：VMess / SS2022 / VLESS / AnyTLS）
   0. 退出
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF

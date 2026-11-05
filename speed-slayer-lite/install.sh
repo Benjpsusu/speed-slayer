@@ -10,6 +10,7 @@ readonly SHORTCUT="/usr/local/sbin/${APP}"
 readonly SCRIPT_URL="https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh"
 readonly XRAY_VERSION="26.10.21"
 readonly CLOUDFLARED_VERSION="2026.10.3"
+readonly SINGBOX_VERSION="1.14.4"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf '[%s] %s\n' "$APP" "$*"; }
@@ -28,13 +29,14 @@ set_protocols() {
   local value=$1 item
   local -a items=()
   [[ -n $value && $value != ,* && $value != *, && $value != *,,* ]] || return 1
-  ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0
+  ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0
   IFS=',' read -r -a items <<<"$value"
   for item in "${items[@]}"; do
     case $item in
       vmess) ENABLE_VMESS=1 ;;
       ss2022) ENABLE_SS2022=1 ;;
       vless) ENABLE_VLESS=1 ;;
+      anytls) ENABLE_ANYTLS=1 ;;
       *) return 1 ;;
     esac
   done
@@ -42,6 +44,7 @@ set_protocols() {
   [[ $ENABLE_VMESS == 0 ]] || PROTOCOLS='vmess'
   [[ $ENABLE_SS2022 == 0 ]] || PROTOCOLS="${PROTOCOLS:+$PROTOCOLS,}ss2022"
   [[ $ENABLE_VLESS == 0 ]] || PROTOCOLS="${PROTOCOLS:+$PROTOCOLS,}vless"
+  [[ $ENABLE_ANYTLS == 0 ]] || PROTOCOLS="${PROTOCOLS:+$PROTOCOLS,}anytls"
   [[ -n $PROTOCOLS ]]
 }
 
@@ -50,9 +53,12 @@ protocol_enabled() {
     vmess) [[ ${ENABLE_VMESS:-1} == 1 ]] ;;
     ss2022) [[ ${ENABLE_SS2022:-1} == 1 ]] ;;
     vless) [[ ${ENABLE_VLESS:-1} == 1 ]] ;;
+    anytls) [[ ${ENABLE_ANYTLS:-0} == 1 ]] ;;
     *) return 1 ;;
   esac
 }
+
+xray_enabled() { protocol_enabled vmess || protocol_enabled ss2022 || protocol_enabled vless; }
 
 load_state() {
   [[ -r $APP_DIR/state ]] || die '尚未安装，请先从菜单创建节点。'
@@ -62,12 +68,14 @@ load_state() {
   VMESS_ADDRESS='' VMESS_UUID='' VLESS_UUID='' WS_PATH='' SS_PASSWORD=''
   VLESS_TRANSPORT=tcp XHTTP_PATH='' REALITY_SERVER_NAME='' REALITY_PUBLIC='' REALITY_SHORT_ID=''
   ARGO_MODE='' ARGO_DOMAIN=''
+  ANYTLS_PORT='' ANYTLS_SERVER_NAME='' ANYTLS_PASSWORD='' ANYTLS_CERT_MODE=''
+  ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL=''
   while IFS='=' read -r key value; do
     [[ -n $key && ! ${seen[$key]+yes} ]] || die 'state 包含空字段或重复字段。'
     seen[$key]=1
     case $key in
       PROTOCOLS) stored_protocols=$value ;;
-      VMESS_PORT|SS_PORT|REALITY_PORT|REALITY_GUARD_PORT|VMESS_ADDRESS|VMESS_UUID|VLESS_UUID|WS_PATH|VLESS_TRANSPORT|XHTTP_PATH|SS_PASSWORD|REALITY_SERVER_NAME|REALITY_PUBLIC|REALITY_SHORT_ID|ARGO_MODE|ARGO_DOMAIN)
+      VMESS_PORT|SS_PORT|REALITY_PORT|REALITY_GUARD_PORT|VMESS_ADDRESS|VMESS_UUID|VLESS_UUID|WS_PATH|VLESS_TRANSPORT|XHTTP_PATH|SS_PASSWORD|REALITY_SERVER_NAME|REALITY_PUBLIC|REALITY_SHORT_ID|ARGO_MODE|ARGO_DOMAIN|ANYTLS_PORT|ANYTLS_SERVER_NAME|ANYTLS_PASSWORD|ANYTLS_CERT_MODE|ANYTLS_CERT_FILE|ANYTLS_KEY_FILE|ANYTLS_EMAIL)
         printf -v "$key" '%s' "$value" ;;
     esac
   done <"$APP_DIR/state"
@@ -95,6 +103,16 @@ detect_arch() {
       CF_SHA=89297ebfb9e8c99c0dc013a1140601453cf3798d8306c5591651f4a3f5210be8 ;;
     *) die '仅支持 amd64 和 arm64' ;;
   esac
+  SB_ARCH=$CF_ARCH
+  case $SB_ARCH in
+    amd64) SB_SHA=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968 ;;
+    arm64) SB_SHA=436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26 ;;
+  esac
+  if protocol_enabled anytls; then
+    [[ $(uname -s) == Linux ]] || die 'AnyTLS 服务端安装仅支持 Linux。'
+    log "Linux $(uname -r) / $SB_ARCH：AnyTLS 使用独立 sing-box $SINGBOX_VERSION，不更换 Linux 内核。"
+    if command -v sing-box >/dev/null 2>&1; then log '发现已有 sing-box；保留原程序，Lite 使用自己目录中的二进制。'; fi
+  fi
 }
 
 install_packages() {
@@ -112,21 +130,24 @@ install_packages() {
   need_cmd systemctl
   [[ -d /run/systemd/system ]] || die '当前环境未运行 systemd'
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl unzip openssl iproute2 python3
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl unzip openssl iproute2 python3 tar util-linux
 }
 
 stage_binaries() {
   local stage=$1
   mkdir -p "$stage"
-  download_checked "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip" "$stage/xray.zip" "$XRAY_SHA"
-  unzip -q "$stage/xray.zip" xray -d "$stage"
-  chmod 0755 "$stage/xray"
-  "$stage/xray" version
+  if xray_enabled; then
+    download_checked "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip" "$stage/xray.zip" "$XRAY_SHA"
+    unzip -q "$stage/xray.zip" xray -d "$stage"
+    chmod 0755 "$stage/xray"
+    "$stage/xray" version
+  fi
   if protocol_enabled vmess; then
     download_checked "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${CF_ARCH}" "$stage/cloudflared" "$CF_SHA"
     chmod 0755 "$stage/cloudflared"
     "$stage/cloudflared" --version
   fi
+  if protocol_enabled anytls; then stage_anytls_binary "$stage"; fi
 }
 
 replace_binary() {
@@ -142,8 +163,12 @@ install_binaries() (
   stage=$(mktemp -d)
   trap 'rm -rf -- "$stage"' EXIT
   stage_binaries "$stage"
-  replace_binary "$stage/xray" "$BIN_DIR/xray"
+  if xray_enabled; then replace_binary "$stage/xray" "$BIN_DIR/xray"; fi
   if protocol_enabled vmess; then replace_binary "$stage/cloudflared" "$BIN_DIR/cloudflared"; fi
+  if protocol_enabled anytls; then
+    install -d -m 0755 "$APP_DIR/bin"
+    replace_binary "$stage/sing-box" "$APP_DIR/bin/sing-box"
+  fi
 )
 
 install_self() {
@@ -160,15 +185,324 @@ install_self() {
 }
 
 create_users() {
-  getent group xray >/dev/null || groupadd --system xray
-  id xray >/dev/null 2>&1 || useradd --system --gid xray --home-dir /var/lib/xray --shell /usr/sbin/nologin xray
-  install -d -m 0750 -o root -g xray "$APP_DIR" /var/lib/xray
+  if xray_enabled; then
+    getent group xray >/dev/null || groupadd --system xray
+    id xray >/dev/null 2>&1 || useradd --system --gid xray --home-dir /var/lib/xray --shell /usr/sbin/nologin xray
+    install -d -m 0750 -o root -g xray "$APP_DIR" /var/lib/xray
+  fi
+  if protocol_enabled anytls; then create_anytls_user; fi
   if protocol_enabled vmess; then
     getent group cloudflared >/dev/null || groupadd --system cloudflared
     id cloudflared >/dev/null 2>&1 || useradd --system --gid cloudflared --home-dir /var/lib/cloudflared --shell /usr/sbin/nologin cloudflared
     install -d -m 0750 -o cloudflared -g cloudflared /var/lib/cloudflared
   fi
 }
+
+stage_anytls_binary() {
+  local stage=$1 archive="sing-box-${SINGBOX_VERSION}-linux-${SB_ARCH}"
+  mkdir -p "$stage"
+  download_checked "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${archive}.tar.gz" "$stage/sing-box.tar.gz" "$SB_SHA"
+  # Extract only the known binary from the verified release, never arbitrary paths.
+  tar -xzf "$stage/sing-box.tar.gz" -C "$stage" --strip-components=1 "$archive/sing-box"
+  chmod 0755 "$stage/sing-box"
+  "$stage/sing-box" version
+}
+
+create_anytls_user() {
+  getent group speed-anytls >/dev/null || groupadd --system speed-anytls
+  id speed-anytls >/dev/null 2>&1 || useradd --system --gid speed-anytls --home-dir /nonexistent --shell /usr/sbin/nologin speed-anytls
+  # Both low-privilege service users may traverse; secrets remain 0600/0640.
+  mkdir -p "$APP_DIR"
+  chmod 0711 "$APP_DIR"
+  install -d -m 0750 -o root -g speed-anytls "$APP_DIR/tls"
+  install -d -m 0700 -o speed-anytls -g speed-anytls "$APP_DIR/acme"
+}
+
+configure_anytls() {
+  local value default_port=443
+  if { protocol_enabled vless && [[ ${REALITY_PORT:-443} == 443 ]]; } || ! port_free 443; then default_port=8443; fi
+  log 'AnyTLS 需要自己的域名；SNI 与证书域名相同。域名请使用仅 DNS 解析到本机。'
+  while true; do
+    read -r -p "AnyTLS 域名/SNI [${ANYTLS_SERVER_NAME:-}]: " value || return 1
+    value=${value:-${ANYTLS_SERVER_NAME:-}}
+    if validate_domain "$value"; then ANYTLS_SERVER_NAME=$value; break; fi
+    log '请输入有效的域名，不含协议、路径或端口。'
+  done
+  while true; do
+    read -r -p "AnyTLS TCP 端口 [${ANYTLS_PORT:-$default_port}]: " value || return 1
+    value=${value:-${ANYTLS_PORT:-$default_port}}
+    if valid_reality_port "$value"; then ANYTLS_PORT=$value; break; fi
+    log '端口应为 443 或 1024–65535。'
+  done
+  while true; do
+    printf '证书方式：1. 自动申请/续期（需独占并开放 TCP 80）  2. 已有可信证书\n'
+    log "选择自动申请表示使用 Let's Encrypt 服务及其条款；80 被网站占用时请选择已有证书。"
+    read -r -p '请选择 [1]: ' value || return 1
+    case ${value:-1} in
+      1)
+        ANYTLS_CERT_MODE=acme ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE=''
+        read -r -p '证书联系邮箱: ' ANYTLS_EMAIL || return 1
+        break ;;
+      2)
+        ANYTLS_CERT_MODE=file ANYTLS_EMAIL=''
+        read -r -p '完整证书链 PEM 的绝对路径: ' ANYTLS_CERT_FILE || return 1
+        read -r -p '私钥 PEM 的绝对路径: ' ANYTLS_KEY_FILE || return 1
+        break ;;
+      *) log '请输入 1 或 2。' ;;
+    esac
+  done
+}
+
+validate_anytls_options() {
+  ANYTLS_PORT=${ANYTLS_PORT:-8443}
+  ANYTLS_CERT_MODE=${ANYTLS_CERT_MODE:-acme}
+  validate_domain "${ANYTLS_SERVER_NAME:-}" || die 'AnyTLS 必须设置自己的 ANYTLS_SERVER_NAME 域名。'
+  valid_reality_port "$ANYTLS_PORT" || die 'ANYTLS_PORT 只能为 443 或 1024–65535'
+  ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-}
+  [[ -z $ANYTLS_PASSWORD || $ANYTLS_PASSWORD =~ ^[a-fA-F0-9]{64}$ ]] || die 'ANYTLS_PASSWORD 应为 64 位十六进制；留空自动生成。'
+  case $ANYTLS_CERT_MODE in
+    acme)
+      [[ ${ANYTLS_EMAIL:-} =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]] || die '自动证书需设置有效 ANYTLS_EMAIL'
+      ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ;;
+    file)
+      local file
+      for file in "${ANYTLS_CERT_FILE:-}" "${ANYTLS_KEY_FILE:-}"; do
+        [[ $file == /* && $file != *$'\n'* && $file != *$'\r'* && -r $file ]] || die '证书和私钥必须是可读的绝对路径。'
+        [[ $file != "$APP_DIR/"* ]] || die '源证书请保存在 Lite 目录外，以便卸载后保留。'
+      done
+      ANYTLS_EMAIL='' ;;
+    *) die 'ANYTLS_CERT_MODE 只接受 acme 或 file' ;;
+  esac
+}
+
+check_anytls_certificate() {
+  local certificate=$1 key=$2
+  openssl x509 -in "$certificate" -noout -checkend 86400 >/dev/null || die '证书已过期或将在 24 小时内过期。'
+  # Some OpenSSL versions return 0 even when -checkhost reports a mismatch.
+  openssl x509 -in "$certificate" -noout -checkhost "$ANYTLS_SERVER_NAME" |
+    grep -Fx "Hostname $ANYTLS_SERVER_NAME does match certificate" >/dev/null || die '证书域名与 AnyTLS SNI 不匹配。'
+  python3 - "$certificate" "$key" <<'PY'
+import ssl, sys
+# Validate PEM syntax, key pairing and server-side TLS suitability without a prompt.
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(sys.argv[1], sys.argv[2], password=lambda: '')
+PY
+}
+
+copy_anytls_certificate() {
+  check_anytls_certificate "$ANYTLS_CERT_FILE" "$ANYTLS_KEY_FILE"
+  install -m 0640 -o root -g speed-anytls "$ANYTLS_CERT_FILE" "$APP_DIR/tls/fullchain.pem"
+  install -m 0640 -o root -g speed-anytls "$ANYTLS_KEY_FILE" "$APP_DIR/tls/privkey.pem"
+}
+
+write_anytls_config() {
+  if [[ $ANYTLS_CERT_MODE == file ]]; then copy_anytls_certificate; fi
+  python3 - "$APP_DIR" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = dict(l.split('=', 1) for l in (p/'state').read_text(encoding='utf-8').splitlines())
+tls = {'enabled': True, 'server_name': s['ANYTLS_SERVER_NAME'], 'min_version': '1.2'}
+if s['ANYTLS_CERT_MODE'] == 'acme':
+    tls['certificate_provider'] = {
+        'type': 'acme', 'domain': [s['ANYTLS_SERVER_NAME']],
+        'data_directory': str(p/'acme'), 'email': s['ANYTLS_EMAIL'],
+        'provider': 'letsencrypt', 'disable_tls_alpn_challenge': True,
+    }
+else:
+    tls.update(certificate_path=str(p/'tls/fullchain.pem'), key_path=str(p/'tls/privkey.pem'))
+c = {'log': {'level': 'warn'},
+     'inbounds': [{'type': 'anytls', 'tag': 'anytls-in', 'listen': '::',
+                   'listen_port': int(s['ANYTLS_PORT']),
+                   'users': [{'name': 'lite', 'password': s['ANYTLS_PASSWORD']}], 'tls': tls}],
+     'outbounds': [{'type': 'direct', 'tag': 'direct'}]}
+(p/'anytls.json').write_bytes((json.dumps(c, ensure_ascii=False, indent=2)+'\n').encode('utf-8'))
+PY
+  chown root:speed-anytls "$APP_DIR/anytls.json"
+  chmod 0640 "$APP_DIR/anytls.json"
+}
+
+write_anytls_unit() {
+  cat >"$UNIT_DIR/anytls-lite.service" <<EOF
+[Unit]
+Description=AnyTLS for Speed Slayer Lite (sing-box)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=speed-anytls
+Group=speed-anytls
+$(if [[ $ANYTLS_PORT == 443 || $ANYTLS_CERT_MODE == acme ]]; then printf 'AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE'; fi)
+ExecStart=$APP_DIR/bin/sing-box run -c $APP_DIR/anytls.json
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$APP_DIR/acme
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+verify_anytls_tls() {
+  log '正在检查 AnyTLS TLS 握手和证书信任（首次自动签发最多等待 120 秒）...'
+  python3 - "$ANYTLS_PORT" "$ANYTLS_SERVER_NAME" "$ANYTLS_CERT_MODE" <<'PY'
+import socket, ssl, sys, time
+port, host, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+deadline = time.monotonic() + (120 if mode == 'acme' else 15)
+last = ''
+while time.monotonic() < deadline:
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=3) as sock:
+            with ssl.create_default_context().wrap_socket(sock, server_hostname=host):
+                print('AnyTLS TLS certificate verified.')
+                sys.exit(0)
+    except (OSError, ssl.SSLError) as exc:
+        last = str(exc)
+        time.sleep(2)
+sys.exit('AnyTLS TLS 验证失败；检查域名解析、公网 80、证书链及 journalctl -u anytls-lite：' + last)
+PY
+}
+
+start_anytls() {
+  systemctl enable --now anytls-lite.service
+  systemctl is-active --quiet anytls-lite.service || die 'AnyTLS 启动失败，请检查 journalctl -u anytls-lite'
+  verify_anytls_tls
+}
+
+anytls_instructions() {
+  log "AnyTLS：开放 $ANYTLS_PORT/tcp；SNI=$ANYTLS_SERVER_NAME；客户端使用 sing-box/mihomo，开启证书校验。"
+  if [[ $ANYTLS_CERT_MODE == acme ]]; then
+    log '自动证书使用 HTTP-01：域名必须直指本机，公网 TCP 80 需持续可用供续期。'
+  else
+    log "已有证书已复制；外部续期后运行 $APP refresh-anytls-cert 安全刷新。"
+  fi
+}
+
+do_add_anytls() (
+  need_root
+  # Keep requested options across load_state; never re-generate existing protocols.
+  local domain=${ANYTLS_SERVER_NAME:-} port=${ANYTLS_PORT:-} mode=${ANYTLS_CERT_MODE:-}
+  local cert=${ANYTLS_CERT_FILE:-} key=${ANYTLS_KEY_FILE:-} email=${ANYTLS_EMAIL:-} password=${ANYTLS_PASSWORD:-}
+  [[ -r $APP_DIR/state ]] || die '请先创建 Lite 节点。'
+  need_cmd flock
+  exec 9>"$APP_DIR/manage.lock"
+  flock -n 9 || die '另一项维护操作仍在运行。'
+  load_state
+  protocol_enabled anytls && die '已安装 AnyTLS；更新请选择菜单 4。'
+  [[ ! -e $APP_DIR/anytls.json && ! -e $UNIT_DIR/anytls-lite.service && ! -e $APP_DIR/bin/sing-box && ! -e $APP_DIR/tls && ! -e $APP_DIR/acme ]] || die '存在未记录的 AnyTLS 文件，请先检查，拒绝覆盖。'
+  ANYTLS_SERVER_NAME=$domain ANYTLS_PORT=$port ANYTLS_CERT_MODE=$mode
+  ANYTLS_CERT_FILE=$cert ANYTLS_KEY_FILE=$key ANYTLS_EMAIL=$email ANYTLS_PASSWORD=$password
+  if [[ -z $ANYTLS_SERVER_NAME && -t 0 ]]; then configure_anytls || return 0; fi
+  set_protocols "$PROTOCOLS,anytls"
+  validate_anytls_options
+  install_packages
+  ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(openssl rand -hex 32)}
+  port_free "$ANYTLS_PORT" || die "端口 $ANYTLS_PORT 已占用。"
+  if [[ $ANYTLS_CERT_MODE == acme ]]; then port_free 80 || die '80 已占用，请用已有证书方式。'; fi
+  local existing
+  for existing in "$VMESS_PORT" "$SS_PORT" "$REALITY_PORT" "$REALITY_GUARD_PORT"; do
+    [[ -z $existing ]] || (( 10#$existing != 10#$ANYTLS_PORT )) || die 'AnyTLS 与已有节点端口重复。'
+  done
+  detect_arch
+  add_backup=$(mktemp -d "$APP_DIR/backup-anytls-$(date +%Y%m%d%H%M%S).XXXXXX")
+  chmod 0700 "$add_backup"
+  cp -p "$APP_DIR/state" "$APP_DIR/install.sh" "$add_backup/"
+  if [[ -f $APP_DIR/client-info.txt ]]; then cp -p "$APP_DIR/client-info.txt" "$add_backup/"; fi
+  add_old_mode=$(stat -c %a "$APP_DIR")
+  stage_anytls_binary "$add_backup/candidate"
+  add_changed=0
+  rollback_add_anytls() {
+    local status=$?
+    trap - EXIT INT TERM
+    if (( status != 0 && add_changed == 1 )); then
+      log "追加 AnyTLS 失败，恢复已有节点状态：$add_backup"
+      systemctl disable --now anytls-lite.service >/dev/null 2>&1 || true
+      if systemctl is-active --quiet anytls-lite.service; then
+        log "AnyTLS 未能停止，保留文件；请检查服务并从 $add_backup 手动恢复。"
+        exit "$status"
+      fi
+      cp -p "$add_backup/state" "$add_backup/install.sh" "$APP_DIR/"
+      if [[ -f $add_backup/client-info.txt ]]; then cp -p "$add_backup/client-info.txt" "$APP_DIR/"; else rm -f "$APP_DIR/client-info.txt"; fi
+      rm -f -- "$APP_DIR/anytls.json" "$APP_DIR/bin/sing-box" "$UNIT_DIR/anytls-lite.service"
+      rm -rf -- "$APP_DIR/tls" "$APP_DIR/acme"
+      chmod "$add_old_mode" "$APP_DIR"
+      systemctl daemon-reload
+    fi
+    exit "$status"
+  }
+  trap rollback_add_anytls EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  add_changed=1
+  create_anytls_user
+  install -d -m 0755 "$APP_DIR/bin"
+  replace_binary "$add_backup/candidate/sing-box" "$APP_DIR/bin/sing-box"
+  export PROTOCOLS ANYTLS_PORT ANYTLS_SERVER_NAME ANYTLS_PASSWORD ANYTLS_CERT_MODE ANYTLS_CERT_FILE ANYTLS_KEY_FILE ANYTLS_EMAIL
+  python3 - "$APP_DIR/state" <<'PY'
+import os, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = dict(l.split('=', 1) for l in p.read_text(encoding='utf-8').splitlines())
+for k in ('PROTOCOLS', 'ANYTLS_PORT', 'ANYTLS_SERVER_NAME', 'ANYTLS_PASSWORD', 'ANYTLS_CERT_MODE', 'ANYTLS_CERT_FILE', 'ANYTLS_KEY_FILE', 'ANYTLS_EMAIL'):
+    s[k] = os.environ[k]
+p.write_bytes(''.join(f'{k}={v}\n' for k,v in s.items()).encode('utf-8'))
+PY
+  write_anytls_config
+  "$APP_DIR/bin/sing-box" check -c "$APP_DIR/anytls.json"
+  write_anytls_unit
+  install_self
+  systemctl daemon-reload
+  start_anytls
+  write_client_info
+  add_changed=0
+  log '已追加 AnyTLS，原 Xray/Argo 服务及节点凭据保持原样。'
+  anytls_instructions
+  cat "$APP_DIR/client-info.txt"
+)
+
+do_refresh_anytls_cert() (
+  need_root
+  [[ -r $APP_DIR/state ]] || die '尚未安装 Lite。'
+  need_cmd flock
+  exec 9>"$APP_DIR/manage.lock"
+  flock -n 9 || die '另一项维护操作仍在运行。'
+  load_state
+  protocol_enabled anytls || die '未安装 AnyTLS。'
+  [[ $ANYTLS_CERT_MODE == file ]] || die 'ACME 模式由 sing-box 自动续期，无需此命令。'
+  check_anytls_certificate "$ANYTLS_CERT_FILE" "$ANYTLS_KEY_FILE"
+  cert_backup=$(mktemp -d "$APP_DIR/backup-cert-$(date +%Y%m%d%H%M%S).XXXXXX")
+  chmod 0700 "$cert_backup"
+  cp -p "$APP_DIR/tls/fullchain.pem" "$APP_DIR/tls/privkey.pem" "$cert_backup/"
+  rollback_cert() {
+    local status=$?
+    trap - EXIT INT TERM
+    if (( status != 0 )); then
+      cp -p "$cert_backup/fullchain.pem" "$cert_backup/privkey.pem" "$APP_DIR/tls/"
+      systemctl restart anytls-lite.service || log "恢复证书后服务重启失败，请检查 $cert_backup。"
+      log "刷新失败，已恢复旧证书：$cert_backup"
+    fi
+    exit "$status"
+  }
+  trap rollback_cert EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  copy_anytls_certificate
+  "$APP_DIR/bin/sing-box" check -c "$APP_DIR/anytls.json"
+  systemctl restart anytls-lite.service
+  systemctl is-active --quiet anytls-lite.service
+  verify_anytls_tls
+  trap - EXIT INT TERM
+  log "证书已刷新并通过验证；旧证书备份：$cert_backup"
+)
 
 write_config() {
   local keys
@@ -191,6 +525,7 @@ write_config() {
   else
     XHTTP_PATH=''
   fi
+  if protocol_enabled anytls; then ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(openssl rand -hex 32)}; fi
   cat >"$APP_DIR/state" <<EOF
 PROTOCOLS=$PROTOCOLS
 VMESS_PORT=${VMESS_PORT:-}
@@ -209,8 +544,17 @@ REALITY_PUBLIC=$REALITY_PUBLIC
 REALITY_SHORT_ID=$REALITY_SHORT_ID
 ARGO_MODE=${ARGO_MODE:-}
 ARGO_DOMAIN=${ARGO_DOMAIN:-}
+ANYTLS_PORT=${ANYTLS_PORT:-}
+ANYTLS_SERVER_NAME=${ANYTLS_SERVER_NAME:-}
+ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-}
+ANYTLS_CERT_MODE=${ANYTLS_CERT_MODE:-}
+ANYTLS_CERT_FILE=${ANYTLS_CERT_FILE:-}
+ANYTLS_KEY_FILE=${ANYTLS_KEY_FILE:-}
+ANYTLS_EMAIL=${ANYTLS_EMAIL:-}
 EOF
   chmod 0600 "$APP_DIR/state"
+  if protocol_enabled anytls; then write_anytls_config; fi
+  xray_enabled || return 0
   REALITY_PRIVATE="$REALITY_PRIVATE" python3 - "$APP_DIR" <<'PY'
 import json, os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -284,7 +628,8 @@ EOF
 }
 
 write_units() {
-  render_xray_unit >"$UNIT_DIR/xray-lite.service"
+  if xray_enabled; then render_xray_unit >"$UNIT_DIR/xray-lite.service"; fi
+  if protocol_enabled anytls; then write_anytls_unit; fi
   protocol_enabled vmess || return 0
   local cf_exec cf_env=''
   if [[ $ARGO_MODE == token ]]; then
@@ -372,6 +717,11 @@ write_client_info() (
     if [[ $VLESS_TRANSPORT == xhttp ]]; then label='VLESS + XHTTP + REALITY'; else label='VLESS + TCP + REALITY + Vision（尚未迁移）'; fi
     content+="$label"$'\n'"$uri"$'\n\n'
   fi
+  if protocol_enabled anytls; then
+    validate_domain "$ANYTLS_SERVER_NAME" || die 'state 中的 ANYTLS_SERVER_NAME 无效'
+    uri="anytls://${ANYTLS_PASSWORD}@${ANYTLS_SERVER_NAME}:${ANYTLS_PORT}/?sni=${ANYTLS_SERVER_NAME}&insecure=0#anytls"
+    content+="AnyTLS + TLS（客户端使用 sing-box / mihomo；开启证书校验）"$'\n'"$uri"$'\n\n'
+  fi
   tmp=$(mktemp "$APP_DIR/client-info.XXXXXX")
   trap 'rm -f -- "$tmp"' EXIT
   printf '%s提示：此文件包含节点访问凭据，仅保存在服务器本机。\n' "$content" >"$tmp"
@@ -395,30 +745,32 @@ vless_uri() {
 configure_install() {
   local input item sni_mode value
   local -a choices=()
-  ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0
+  ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0
   while true; do
     printf '\n请选择需要创建的协议（输入编号切换勾选，可输入 1 3）：\n'
     printf '  [%s] 1. VMess + WebSocket + Argo\n' "$( [[ $ENABLE_VMESS == 1 ]] && printf x || printf ' ' )"
     printf '  [%s] 2. Shadowsocks 2022\n' "$( [[ $ENABLE_SS2022 == 1 ]] && printf x || printf ' ' )"
     printf '  [%s] 3. VLESS + XHTTP + REALITY\n' "$( [[ $ENABLE_VLESS == 1 ]] && printf x || printf ' ' )"
+    printf '  [%s] 4. AnyTLS + TLS（自己的域名和证书）\n' "$( [[ $ENABLE_ANYTLS == 1 ]] && printf x || printf ' ' )"
     printf '  a. 全选  n. 清空  0. 取消  回车：确认选择\n'
     read -r -p '请选择: ' input || return 1
     case $input in
       0) return 1 ;;
-      a|A) ENABLE_VMESS=1 ENABLE_SS2022=1 ENABLE_VLESS=1; continue ;;
-      n|N) ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0; continue ;;
+      a|A) ENABLE_VMESS=1 ENABLE_SS2022=1 ENABLE_VLESS=1 ENABLE_ANYTLS=1; continue ;;
+      n|N) ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0; continue ;;
       '')
-        [[ $ENABLE_VMESS$ENABLE_SS2022$ENABLE_VLESS != 000 ]] && break
+        [[ $ENABLE_VMESS$ENABLE_SS2022$ENABLE_VLESS$ENABLE_ANYTLS != 0000 ]] && break
         log '请至少勾选一个协议。'; continue ;;
     esac
     input=${input//,/ }
-    [[ $input =~ ^[123[:space:]]+$ ]] || { log '只接受编号 1、2、3。'; continue; }
+    [[ $input =~ ^[1234[:space:]]+$ ]] || { log '只接受编号 1、2、3、4。'; continue; }
     read -r -a choices <<<"$input"
     for item in "${choices[@]}"; do
       case $item in
         1) ENABLE_VMESS=$((1-ENABLE_VMESS)) ;;
         2) ENABLE_SS2022=$((1-ENABLE_SS2022)) ;;
         3) ENABLE_VLESS=$((1-ENABLE_VLESS)) ;;
+        4) ENABLE_ANYTLS=$((1-ENABLE_ANYTLS)) ;;
         *) log '请用空格分隔编号，例如 1 3。' ;;
       esac
     done
@@ -427,6 +779,7 @@ configure_install() {
   [[ $ENABLE_VMESS == 0 ]] || value=vmess
   [[ $ENABLE_SS2022 == 0 ]] || value="${value:+$value,}ss2022"
   [[ $ENABLE_VLESS == 0 ]] || value="${value:+$value,}vless"
+  [[ $ENABLE_ANYTLS == 0 ]] || value="${value:+$value,}anytls"
   set_protocols "$value" || return 1
   if protocol_enabled vless; then
     while true; do
@@ -448,11 +801,12 @@ configure_install() {
       log '端口应为 443 或 1024–65535。'
     done
   fi
+  if protocol_enabled anytls; then configure_anytls || return 1; fi
   log "将创建：$PROTOCOLS"
 }
 
 validate_install_options() {
-  set_protocols "${PROTOCOLS-vmess,ss2022,vless}" || die 'PROTOCOLS 只接受 vmess、ss2022、vless，用逗号分隔且至少选择一个。'
+  set_protocols "${PROTOCOLS-vmess,ss2022,vless}" || die 'PROTOCOLS 只接受 vmess、ss2022、vless、anytls，用逗号分隔。'
   local port
   local -A used=()
   ACTIVE_PORTS=()
@@ -486,6 +840,14 @@ validate_install_options() {
     [[ -z ${XHTTP_PATH:-} ]] || valid_xhttp_path "$XHTTP_PATH" || die 'XHTTP_PATH 格式无效'
     ACTIVE_PORTS+=("$REALITY_PORT" "$REALITY_GUARD_PORT")
   else REALITY_PORT='' REALITY_GUARD_PORT='' REALITY_SERVER_NAME='' XHTTP_PATH=''; fi
+  if protocol_enabled anytls; then
+    validate_anytls_options
+    ACTIVE_PORTS+=("$ANYTLS_PORT")
+    if [[ $ANYTLS_CERT_MODE == acme ]]; then ACTIVE_PORTS+=(80); fi
+  else
+    ANYTLS_PORT='' ANYTLS_SERVER_NAME='' ANYTLS_PASSWORD='' ANYTLS_CERT_MODE=''
+    ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL=''
+  fi
   for port in "${ACTIVE_PORTS[@]}"; do
     port=$((10#$port))
     [[ ! ${used[$port]+yes} ]] || die "已选协议的端口不能重复：$port"
@@ -495,13 +857,13 @@ validate_install_options() {
 
 remove_services_and_config() {
   local unit
-  for unit in cloudflared-lite xray-lite; do
+  for unit in anytls-lite cloudflared-lite xray-lite; do
     if [[ -f $UNIT_DIR/$unit.service ]]; then
       systemctl disable --now "$unit.service" || true
       if systemctl is-active --quiet "$unit.service"; then die "$unit 仍在运行，未删除配置，请检查服务。"; fi
     fi
   done
-  rm -f -- "$UNIT_DIR/cloudflared-lite.service" "$UNIT_DIR/xray-lite.service" "$SHORTCUT"
+  rm -f -- "$UNIT_DIR/anytls-lite.service" "$UNIT_DIR/cloudflared-lite.service" "$UNIT_DIR/xray-lite.service" "$SHORTCUT"
   rm -rf -- "$UNIT_DIR/cloudflared-lite.service.d" "$APP_DIR"
   systemctl daemon-reload
 }
@@ -524,17 +886,21 @@ do_install() {
   local port
   for port in "${ACTIVE_PORTS[@]}"; do port_free "$port" || die "端口 $port 已占用，请选择其他端口。"; done
   detect_arch
-  install_binaries
   trap rollback_install EXIT
+  install_binaries
   create_users
   write_config
-  "$BIN_DIR/xray" run -test -config "$APP_DIR/xray.json"
+  if xray_enabled; then "$BIN_DIR/xray" run -test -config "$APP_DIR/xray.json"; fi
+  if protocol_enabled anytls; then "$APP_DIR/bin/sing-box" check -c "$APP_DIR/anytls.json"; fi
   write_units
   install_self
   ln -sf "$APP_DIR/install.sh" "$SHORTCUT"
   systemctl daemon-reload
-  systemctl enable --now xray-lite.service
-  systemctl is-active --quiet xray-lite.service || die 'Xray 启动失败，请运行 journalctl -u xray-lite'
+  if xray_enabled; then
+    systemctl enable --now xray-lite.service
+    systemctl is-active --quiet xray-lite.service || die 'Xray 启动失败，请运行 journalctl -u xray-lite'
+  fi
+  if protocol_enabled anytls; then start_anytls; fi
   if protocol_enabled vmess; then
     systemctl enable --now cloudflared-lite.service
     systemctl is-active --quiet cloudflared-lite.service || die 'cloudflared 启动失败，请运行 journalctl -u cloudflared-lite'
@@ -546,6 +912,7 @@ do_install() {
   if protocol_enabled ss2022; then log "防火墙需开放 $SS_PORT/tcp+udp。"; fi
   if protocol_enabled vless; then log "防火墙需开放 $REALITY_PORT/tcp；无需开放内部守门端口。"; fi
   if protocol_enabled vmess; then log "VMess 使用 Argo，不要开放内部端口 $VMESS_PORT。请确保服务器和客户端自动对时正常。"; fi
+  if protocol_enabled anytls; then anytls_instructions; fi
   log "完成。运行 $APP 可再次打开管理菜单。"
 }
 
@@ -554,10 +921,12 @@ do_status() (
   need_root
   load_state
   log "已安装协议：$PROTOCOLS"
-  local -a services=(xray-lite.service)
+  local -a services=()
+  if xray_enabled; then services+=(xray-lite.service); fi
   if protocol_enabled vmess; then services+=(cloudflared-lite.service); fi
+  if protocol_enabled anytls; then services+=(anytls-lite.service); fi
   systemctl --no-pager --full status "${services[@]}" || true
-  ss -lntup | grep -E 'xray|cloudflared' || true
+  ss -lntup | grep -E 'xray|cloudflared|sing-box' || true
 )
 
 do_repair_argo() (
@@ -704,21 +1073,31 @@ do_migrate_xhttp() (
 )
 
 restart_selected_services() {
-  local -a services=(xray-lite.service)
+  local -a services=()
+  if xray_enabled; then services+=(xray-lite.service); fi
   if protocol_enabled vmess; then services+=(cloudflared-lite.service); fi
+  if protocol_enabled anytls; then services+=(anytls-lite.service); fi
   systemctl restart "${services[@]}" || return 1
-  systemctl is-active --quiet xray-lite.service || return 1
-  if protocol_enabled vmess; then systemctl is-active --quiet cloudflared-lite.service || return 1; fi
+  local unit
+  for unit in "${services[@]}"; do systemctl is-active --quiet "$unit" || return 1; done
 }
 
 apply_update() (
   need_root
-  [[ -s $APP_DIR/xray.json && -s $APP_DIR/install.sh && -x $BIN_DIR/xray ]] || die '尚未完整安装 Lite。'
-  load_state
+  [[ -s $APP_DIR/install.sh ]] || die '尚未完整安装 Lite。'
   need_cmd curl; need_cmd unzip; need_cmd sha256sum; need_cmd systemctl; need_cmd flock
   exec 9>"$APP_DIR/manage.lock"
   flock -n 9 || die '另一项维护操作仍在运行。'
-  systemctl is-active --quiet xray-lite.service || die 'Xray 未运行，请先检查服务。'
+  load_state
+  if xray_enabled; then
+    [[ -s $APP_DIR/xray.json && -x $BIN_DIR/xray ]] || die 'Xray 文件不完整。'
+    systemctl is-active --quiet xray-lite.service || die 'Xray 未运行，请先检查服务。'
+  fi
+  if protocol_enabled anytls; then
+    [[ -s $APP_DIR/anytls.json && -x $APP_DIR/bin/sing-box ]] || die 'AnyTLS 文件不完整。'
+    systemctl is-active --quiet anytls-lite.service || die 'AnyTLS 未运行，请先检查服务。'
+    need_cmd tar; need_cmd python3
+  fi
   if protocol_enabled vmess; then
     [[ -x $BIN_DIR/cloudflared ]] || die 'cloudflared 不存在，请先检查安装。'
     systemctl is-active --quiet cloudflared-lite.service || die 'Argo 未运行，请先修复隧道。'
@@ -728,19 +1107,29 @@ apply_update() (
   update_changed=0
   update_backup=$(mktemp -d "$APP_DIR/backup-update-$(date +%Y%m%d%H%M%S).XXXXXX")
   chmod 0700 "$update_backup"
-  cp -p "$BIN_DIR/xray" "$update_backup/xray"
+  if xray_enabled; then
+    cp -p "$BIN_DIR/xray" "$update_backup/xray"
+    cp -p "$APP_DIR/xray.json" "$update_backup/"
+  fi
   if protocol_enabled vmess; then cp -p "$BIN_DIR/cloudflared" "$update_backup/cloudflared"; fi
-  cp -p "$APP_DIR/xray.json" "$APP_DIR/state" "$APP_DIR/install.sh" "$update_backup/"
+  if protocol_enabled anytls; then
+    cp -p "$APP_DIR/bin/sing-box" "$update_backup/sing-box"
+    cp -p "$APP_DIR/anytls.json" "$update_backup/"
+    cp -a "$APP_DIR/tls" "$APP_DIR/acme" "$update_backup/"
+  fi
+  cp -p "$APP_DIR/state" "$APP_DIR/install.sh" "$update_backup/"
   if [[ -f $APP_DIR/client-info.txt ]]; then cp -p "$APP_DIR/client-info.txt" "$update_backup/client-info.txt"; fi
   printf 'Xray candidate=%s\ncloudflared candidate=%s\nprotocols=%s\n' "$XRAY_VERSION" "$CLOUDFLARED_VERSION" "$PROTOCOLS" >"$update_backup/update.txt"
+  if protocol_enabled anytls; then printf 'sing-box candidate=%s\n' "$SINGBOX_VERSION" >>"$update_backup/update.txt"; fi
 
   rollback_update() {
     local status=$? failed=0
     trap - EXIT INT TERM
     if (( status != 0 && update_changed == 1 )); then
       log "更新失败，正在恢复旧版内核和脚本：$update_backup"
-      replace_binary "$update_backup/xray" "$BIN_DIR/xray" || failed=1
+      if xray_enabled; then replace_binary "$update_backup/xray" "$BIN_DIR/xray" || failed=1; fi
       if protocol_enabled vmess; then replace_binary "$update_backup/cloudflared" "$BIN_DIR/cloudflared" || failed=1; fi
+      if protocol_enabled anytls; then replace_binary "$update_backup/sing-box" "$APP_DIR/bin/sing-box" || failed=1; fi
       cp -p "$update_backup/install.sh" "$APP_DIR/install.sh" || failed=1
       if [[ -f $update_backup/client-info.txt ]]; then
         cp -p "$update_backup/client-info.txt" "$APP_DIR/client-info.txt" || failed=1
@@ -758,20 +1147,25 @@ apply_update() (
   trap 'exit 143' TERM
 
   stage_binaries "$update_backup/candidate"
-  "$update_backup/candidate/xray" run -test -config "$APP_DIR/xray.json"
+  if xray_enabled; then "$update_backup/candidate/xray" run -test -config "$APP_DIR/xray.json"; fi
+  if protocol_enabled anytls; then "$update_backup/candidate/sing-box" check -c "$APP_DIR/anytls.json"; fi
   install_self "$update_backup/next.install.sh"
   update_changed=1
-  replace_binary "$update_backup/candidate/xray" "$BIN_DIR/xray"
+  if xray_enabled; then replace_binary "$update_backup/candidate/xray" "$BIN_DIR/xray"; fi
   if protocol_enabled vmess; then replace_binary "$update_backup/candidate/cloudflared" "$BIN_DIR/cloudflared"; fi
+  if protocol_enabled anytls; then replace_binary "$update_backup/candidate/sing-box" "$APP_DIR/bin/sing-box"; fi
   mv -f "$update_backup/next.install.sh" "$APP_DIR/install.sh"
   restart_selected_services
+  if protocol_enabled anytls; then verify_anytls_tls; fi
   if protocol_enabled vmess && [[ $ARGO_MODE == quick ]]; then
     wait_for_quick_domain || die '更新后未获取到 Quick Tunnel 域名，正在恢复旧版。'
   fi
   write_client_info
   update_changed=0
   trap - EXIT INT TERM
-  log "更新完成：Xray $XRAY_VERSION；已保留协议、端口、SNI、路径和访问凭据。"
+  log '更新完成；已保留协议、端口、SNI、路径和访问凭据。'
+  if xray_enabled; then log "Xray $XRAY_VERSION"; fi
+  if protocol_enabled anytls; then log "AnyTLS：sing-box $SINGBOX_VERSION，证书配置保留。"; fi
   if protocol_enabled vmess; then log "cloudflared $CLOUDFLARED_VERSION；Quick Tunnel 域名变化时，请重新导入 VMess 链接。"; fi
   log "旧版备份：$update_backup"
   cat "$APP_DIR/client-info.txt"
@@ -802,7 +1196,7 @@ do_uninstall() (
   exec 9>"$APP_DIR/manage.lock"
   flock -n 9 || die '另一项维护操作仍在运行。'
   remove_services_and_config
-  log '已卸载 Lite 节点及管理命令；保留共享 Xray/cloudflared 二进制和系统账户。'
+  log '已卸载 Lite 节点及自有 sing-box、证书副本/ACME 数据；保留外部源证书、共享二进制和系统账户。'
 )
 
 menu() {
@@ -819,6 +1213,8 @@ menu() {
 5. 卸载 Lite 节点
 6. 修复 VMess / Argo 隧道
 7. 旧 VLESS TCP 节点迁移到 XHTTP
+8. 为已有节点追加 AnyTLS（保留其他节点）
+9. 刷新 AnyTLS 已有证书（外部续期后）
 0. 退出
 EOF
     read -r -p '请选择: ' choice || return 0
@@ -828,7 +1224,7 @@ EOF
         if [[ -r $APP_DIR/state ]]; then log '已安装。更新请选 4；重新选择协议需先卸载，原节点凭据会被删除。'; continue; fi
         configure_install || continue
         do_install ;;
-      2|3|4|5|6|7)
+      2|3|4|5|6|7|8|9)
         if [[ ! -r $APP_DIR/state ]]; then log '请先选择 1 创建节点。'; continue; fi
         case $choice in
           2) do_show ;;
@@ -837,6 +1233,8 @@ EOF
           5) do_uninstall ;;
           6) do_repair_argo ;;
           7) do_migrate_xhttp ;;
+          8) do_add_anytls ;;
+          9) do_refresh_anytls_cert ;;
         esac ;;
       *) log '请输入菜单中的编号。' ;;
     esac
@@ -855,8 +1253,10 @@ main() {
     apply-update) apply_update ;;
     repair-argo) do_repair_argo ;;
     migrate-xhttp) do_migrate_xhttp ;;
+    add-anytls) do_add_anytls ;;
+    refresh-anytls-cert) do_refresh_anytls_cert ;;
     uninstall) do_uninstall "${2:-}" ;;
-    *) die "用法: $0 {menu|install|show|status|update|repair-argo|migrate-xhttp|uninstall [--yes]}" ;;
+    *) die "用法: $0 {menu|install|show|status|update|repair-argo|migrate-xhttp|add-anytls|refresh-anytls-cert|uninstall [--yes]}" ;;
   esac
 }
 
