@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
+export PYTHONIOENCODING=utf-8
 
 readonly APP="speed-slayer-lite"
 readonly APP_DIR="/etc/${APP}"
@@ -69,13 +70,13 @@ load_state() {
   VLESS_TRANSPORT=tcp XHTTP_PATH='' REALITY_SERVER_NAME='' REALITY_PUBLIC='' REALITY_SHORT_ID=''
   ARGO_MODE='' ARGO_DOMAIN=''
   ANYTLS_PORT='' ANYTLS_SERVER_NAME='' ANYTLS_PASSWORD='' ANYTLS_CERT_MODE=''
-  ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL=''
+  ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL='' ANYTLS_ADDRESS=''
   while IFS='=' read -r key value; do
     [[ -n $key && ! ${seen[$key]+yes} ]] || die 'state 包含空字段或重复字段。'
     seen[$key]=1
     case $key in
       PROTOCOLS) stored_protocols=$value ;;
-      VMESS_PORT|SS_PORT|REALITY_PORT|REALITY_GUARD_PORT|VMESS_ADDRESS|VMESS_UUID|VLESS_UUID|WS_PATH|VLESS_TRANSPORT|XHTTP_PATH|SS_PASSWORD|REALITY_SERVER_NAME|REALITY_PUBLIC|REALITY_SHORT_ID|ARGO_MODE|ARGO_DOMAIN|ANYTLS_PORT|ANYTLS_SERVER_NAME|ANYTLS_PASSWORD|ANYTLS_CERT_MODE|ANYTLS_CERT_FILE|ANYTLS_KEY_FILE|ANYTLS_EMAIL)
+      VMESS_PORT|SS_PORT|REALITY_PORT|REALITY_GUARD_PORT|VMESS_ADDRESS|VMESS_UUID|VLESS_UUID|WS_PATH|VLESS_TRANSPORT|XHTTP_PATH|SS_PASSWORD|REALITY_SERVER_NAME|REALITY_PUBLIC|REALITY_SHORT_ID|ARGO_MODE|ARGO_DOMAIN|ANYTLS_PORT|ANYTLS_SERVER_NAME|ANYTLS_PASSWORD|ANYTLS_CERT_MODE|ANYTLS_CERT_FILE|ANYTLS_KEY_FILE|ANYTLS_EMAIL|ANYTLS_ADDRESS)
         printf -v "$key" '%s' "$value" ;;
     esac
   done <"$APP_DIR/state"
@@ -221,42 +222,56 @@ create_anytls_user() {
 configure_anytls() {
   local value default_port=443
   if { protocol_enabled vless && [[ ${REALITY_PORT:-443} == 443 ]]; } || ! port_free 443; then default_port=8443; fi
-  log 'AnyTLS 需要自己的域名；SNI 与证书域名相同。域名请使用仅 DNS 解析到本机。'
   while true; do
-    read -r -p "AnyTLS 域名/SNI [${ANYTLS_SERVER_NAME:-}]: " value || return 1
-    value=${value:-${ANYTLS_SERVER_NAME:-}}
-    if validate_domain "$value"; then ANYTLS_SERVER_NAME=$value; break; fi
-    log '请输入有效的域名，不含协议、路径或端口。'
+    printf '证书方式：1. 自动申请/续期（需空闲公网 TCP 80）  2. 已有可信证书  3. 自签证书（IP 直连，免域名/SNI/80）\n'
+    read -r -p '请选择 [1]: ' value || return 1
+    case ${value:-1} in
+      1) ANYTLS_CERT_MODE=acme; break ;;
+      2) ANYTLS_CERT_MODE=file; break ;;
+      3) ANYTLS_CERT_MODE=selfsigned; break ;;
+      *) log '请输入 1、2 或 3。' ;;
+    esac
   done
+  if [[ $ANYTLS_CERT_MODE == selfsigned ]]; then
+    ANYTLS_SERVER_NAME='' ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL=''
+    log '自签模式不发送域名 SNI；客户端需导入本机公有证书或使用公钥指纹配置。'
+    read -r -p "客户端连接的公网 IP [${ANYTLS_ADDRESS:-自动检测}]: " value || return 1
+    ANYTLS_ADDRESS=${value:-${ANYTLS_ADDRESS:-}}
+  else
+    ANYTLS_ADDRESS=''
+    log '填写自己的域名，SNI 与证书域名相同；域名使用仅 DNS 解析到本机。'
+    while true; do
+      read -r -p "AnyTLS 域名/SNI [${ANYTLS_SERVER_NAME:-}]: " value || return 1
+      value=${value:-${ANYTLS_SERVER_NAME:-}}
+      if validate_domain "$value"; then ANYTLS_SERVER_NAME=$value; break; fi
+      log '请输入有效的域名，不含协议、路径或端口。'
+    done
+  fi
   while true; do
     read -r -p "AnyTLS TCP 端口 [${ANYTLS_PORT:-$default_port}]: " value || return 1
     value=${value:-${ANYTLS_PORT:-$default_port}}
     if valid_reality_port "$value"; then ANYTLS_PORT=$value; break; fi
     log '端口应为 443 或 1024–65535。'
   done
-  while true; do
-    printf '证书方式：1. 自动申请/续期（需独占并开放 TCP 80）  2. 已有可信证书\n'
-    log "选择自动申请表示使用 Let's Encrypt 服务及其条款；80 被网站占用时请选择已有证书。"
-    read -r -p '请选择 [1]: ' value || return 1
-    case ${value:-1} in
-      1)
-        ANYTLS_CERT_MODE=acme ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE=''
-        read -r -p '证书联系邮箱: ' ANYTLS_EMAIL || return 1
-        break ;;
-      2)
-        ANYTLS_CERT_MODE=file ANYTLS_EMAIL=''
-        read -r -p '完整证书链 PEM 的绝对路径: ' ANYTLS_CERT_FILE || return 1
-        read -r -p '私钥 PEM 的绝对路径: ' ANYTLS_KEY_FILE || return 1
-        break ;;
-      *) log '请输入 1 或 2。' ;;
-    esac
-  done
+  case $ANYTLS_CERT_MODE in
+    acme)
+      ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE=''
+      log "选择自动申请表示使用 Let's Encrypt 服务及其条款。"
+      read -r -p '证书联系邮箱: ' ANYTLS_EMAIL || return 1 ;;
+    file)
+      ANYTLS_EMAIL=''
+      read -r -p '完整证书链 PEM 的绝对路径: ' ANYTLS_CERT_FILE || return 1
+      read -r -p '私钥 PEM 的绝对路径: ' ANYTLS_KEY_FILE || return 1 ;;
+  esac
 }
 
 validate_anytls_options() {
   ANYTLS_PORT=${ANYTLS_PORT:-8443}
   ANYTLS_CERT_MODE=${ANYTLS_CERT_MODE:-acme}
-  validate_domain "${ANYTLS_SERVER_NAME:-}" || die 'AnyTLS 必须设置自己的 ANYTLS_SERVER_NAME 域名。'
+  if [[ $ANYTLS_CERT_MODE != selfsigned ]]; then
+    validate_domain "${ANYTLS_SERVER_NAME:-}" || die 'AnyTLS 必须设置自己的 ANYTLS_SERVER_NAME 域名。'
+    ANYTLS_ADDRESS=''
+  fi
   valid_reality_port "$ANYTLS_PORT" || die 'ANYTLS_PORT 只能为 443 或 1024–65535'
   ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-}
   [[ -z $ANYTLS_PASSWORD || $ANYTLS_PASSWORD =~ ^[a-fA-F0-9]{64}$ ]] || die 'ANYTLS_PASSWORD 应为 64 位十六进制；留空自动生成。'
@@ -271,16 +286,89 @@ validate_anytls_options() {
         [[ $file != "$APP_DIR/"* ]] || die '源证书请保存在 Lite 目录外，以便卸载后保留。'
       done
       ANYTLS_EMAIL='' ;;
-    *) die 'ANYTLS_CERT_MODE 只接受 acme 或 file' ;;
+    selfsigned)
+      ANYTLS_SERVER_NAME='' ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL=''
+      ANYTLS_ADDRESS=${ANYTLS_ADDRESS:-}
+      [[ -z $ANYTLS_ADDRESS || $ANYTLS_ADDRESS =~ ^[0-9a-fA-F:.]+$ ]] || die 'ANYTLS_ADDRESS 应为 IPv4/IPv6，不含方括号、端口或域名。' ;;
+    *) die 'ANYTLS_CERT_MODE 只接受 acme、file 或 selfsigned' ;;
   esac
+}
+
+detect_anytls_ip() {
+  curl -4 --fail --silent --show-error --max-time 8 --proto '=https' https://api.ipify.org ||
+    curl -6 --fail --silent --show-error --max-time 8 --proto '=https' https://api64.ipify.org
+}
+
+prepare_anytls_identity() {
+  [[ $ANYTLS_CERT_MODE == selfsigned ]] || return 0
+  if [[ -z ${ANYTLS_ADDRESS:-} ]]; then
+    ANYTLS_ADDRESS=$(detect_anytls_ip) || die '无法检测公网 IP，请设置 ANYTLS_ADDRESS 或在交互提示中输入。'
+  fi
+  ANYTLS_ADDRESS=$(python3 - "$ANYTLS_ADDRESS" <<'PY'
+import ipaddress, sys
+try:
+    ip = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    sys.exit('ANYTLS_ADDRESS 不是有效 IP。')
+if ip.is_unspecified or ip.is_loopback or ip.is_multicast or ip.is_link_local or '%' in str(ip):
+    sys.exit('ANYTLS_ADDRESS 必须是客户端可达的服务器 IP。')
+print(ip)
+PY
+  ) || die 'IP 检查失败，请填写客户端实际使用的服务器 IP。'
+}
+
+generate_anytls_certificate() (
+  local renew=${1:-no} stage
+  if [[ $renew != yes && ( -e $APP_DIR/tls/fullchain.pem || -e $APP_DIR/tls/privkey.pem ) ]]; then
+    [[ -s $APP_DIR/tls/fullchain.pem && -s $APP_DIR/tls/privkey.pem ]] || die '自签证书文件不完整，拒绝自动更换密钥。'
+    check_anytls_certificate "$APP_DIR/tls/fullchain.pem" "$APP_DIR/tls/privkey.pem"
+    return
+  fi
+  stage=$(mktemp -d "$APP_DIR/tls/.selfsigned.XXXXXX")
+  trap 'rm -rf -- "$stage"' EXIT
+  python3 - "$stage" "$ANYTLS_ADDRESS" "$APP_DIR/tls/privkey.pem" "$renew" <<'PY'
+import ipaddress, pathlib, subprocess, sys
+p, ip, key, renew = pathlib.Path(sys.argv[1]), str(ipaddress.ip_address(sys.argv[2])), sys.argv[3], sys.argv[4]
+args = ['openssl', 'req', '-x509', '-new', '-sha256', '-days', '3650',
+        '-subj', '/CN=speed-slayer-anytls', '-addext', 'subjectAltName=IP:'+ip,
+        '-addext', 'basicConstraints=critical,CA:FALSE',
+        '-addext', 'keyUsage=critical,digitalSignature', '-addext', 'extendedKeyUsage=serverAuth',
+        '-out', str(p/'fullchain.pem')]
+if renew == 'yes':
+    args += ['-key', key]
+else:
+    args += ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', str(p/'privkey.pem')]
+subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
+PY
+  if [[ $renew == yes ]]; then
+    check_anytls_certificate "$stage/fullchain.pem" "$APP_DIR/tls/privkey.pem"
+  else
+    check_anytls_certificate "$stage/fullchain.pem" "$stage/privkey.pem"
+    install -m 0640 -o root -g speed-anytls "$stage/privkey.pem" "$APP_DIR/tls/privkey.pem"
+  fi
+  install -m 0640 -o root -g speed-anytls "$stage/fullchain.pem" "$APP_DIR/tls/fullchain.pem"
+)
+
+anytls_public_key_pin() {
+  python3 - "$APP_DIR/tls/fullchain.pem" <<'PY'
+import base64, hashlib, subprocess, sys
+pub = subprocess.run(['openssl', 'x509', '-in', sys.argv[1], '-pubkey', '-noout'], check=True, capture_output=True).stdout
+der = subprocess.run(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=pub, check=True, capture_output=True).stdout
+print(base64.b64encode(hashlib.sha256(der).digest()).decode())
+PY
 }
 
 check_anytls_certificate() {
   local certificate=$1 key=$2
   openssl x509 -in "$certificate" -noout -checkend 86400 >/dev/null || die '证书已过期或将在 24 小时内过期。'
   # Some OpenSSL versions return 0 even when -checkhost reports a mismatch.
-  openssl x509 -in "$certificate" -noout -checkhost "$ANYTLS_SERVER_NAME" |
-    grep -Fx "Hostname $ANYTLS_SERVER_NAME does match certificate" >/dev/null || die '证书域名与 AnyTLS SNI 不匹配。'
+  if [[ ${ANYTLS_CERT_MODE:-} == selfsigned ]]; then
+    openssl x509 -in "$certificate" -noout -checkip "$ANYTLS_ADDRESS" |
+      grep -Fx "IP $ANYTLS_ADDRESS does match certificate" >/dev/null || die '证书 IP 与 ANYTLS_ADDRESS 不匹配。'
+  else
+    openssl x509 -in "$certificate" -noout -checkhost "$ANYTLS_SERVER_NAME" |
+      grep -Fx "Hostname $ANYTLS_SERVER_NAME does match certificate" >/dev/null || die '证书域名与 AnyTLS SNI 不匹配。'
+  fi
   python3 - "$certificate" "$key" <<'PY'
 import ssl, sys
 # Validate PEM syntax, key pairing and server-side TLS suitability without a prompt.
@@ -297,11 +385,14 @@ copy_anytls_certificate() {
 
 write_anytls_config() {
   if [[ $ANYTLS_CERT_MODE == file ]]; then copy_anytls_certificate; fi
+  if [[ $ANYTLS_CERT_MODE == selfsigned ]]; then generate_anytls_certificate; fi
   python3 - "$APP_DIR" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = dict(l.split('=', 1) for l in (p/'state').read_text(encoding='utf-8').splitlines())
-tls = {'enabled': True, 'server_name': s['ANYTLS_SERVER_NAME'], 'min_version': '1.2'}
+tls = {'enabled': True, 'min_version': '1.2'}
+if s['ANYTLS_CERT_MODE'] != 'selfsigned':
+    tls['server_name'] = s['ANYTLS_SERVER_NAME']
 if s['ANYTLS_CERT_MODE'] == 'acme':
     tls['certificate_provider'] = {
         'type': 'acme', 'domain': [s['ANYTLS_SERVER_NAME']],
@@ -355,21 +446,22 @@ EOF
 
 verify_anytls_tls() {
   log '正在检查 AnyTLS TLS 握手和证书信任（首次自动签发最多等待 120 秒）...'
-  python3 - "$ANYTLS_PORT" "$ANYTLS_SERVER_NAME" "$ANYTLS_CERT_MODE" <<'PY'
+  python3 - "$ANYTLS_PORT" "${ANYTLS_ADDRESS:-$ANYTLS_SERVER_NAME}" "$ANYTLS_CERT_MODE" "$APP_DIR/tls/fullchain.pem" <<'PY'
 import socket, ssl, sys, time
 port, host, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 deadline = time.monotonic() + (120 if mode == 'acme' else 15)
+context = ssl.create_default_context(cafile=sys.argv[4] if mode == 'selfsigned' else None)
 last = ''
 while time.monotonic() < deadline:
     try:
         with socket.create_connection(('127.0.0.1', port), timeout=3) as sock:
-            with ssl.create_default_context().wrap_socket(sock, server_hostname=host):
+            with context.wrap_socket(sock, server_hostname=host):
                 print('AnyTLS TLS certificate verified.')
                 sys.exit(0)
     except (OSError, ssl.SSLError) as exc:
         last = str(exc)
         time.sleep(2)
-sys.exit('AnyTLS TLS 验证失败；检查域名解析、公网 80、证书链及 journalctl -u anytls-lite：' + last)
+sys.exit('AnyTLS TLS 验证失败；检查证书/IP/域名，自动签发模式另需检查公网 80；journalctl -u anytls-lite：' + last)
 PY
 }
 
@@ -380,6 +472,12 @@ start_anytls() {
 }
 
 anytls_instructions() {
+  if [[ $ANYTLS_CERT_MODE == selfsigned ]]; then
+    log "AnyTLS 自签模式：开放 $ANYTLS_PORT/tcp；连接 IP=$ANYTLS_ADDRESS，无需域名/SNI/80。"
+    log "客户端须导入下方公有证书，或使用 $APP export-anytls-client 导出的公钥指纹配置。"
+    log "自签证书有效期 3650 天；菜单 9 可沿用密钥续期。更新不会更换证书或密码。"
+    return
+  fi
   log "AnyTLS：开放 $ANYTLS_PORT/tcp；SNI=$ANYTLS_SERVER_NAME；客户端使用 sing-box/mihomo，开启证书校验。"
   if [[ $ANYTLS_CERT_MODE == acme ]]; then
     log '自动证书使用 HTTP-01：域名必须直指本机，公网 TCP 80 需持续可用供续期。'
@@ -393,6 +491,7 @@ do_add_anytls() (
   # Keep requested options across load_state; never re-generate existing protocols.
   local domain=${ANYTLS_SERVER_NAME:-} port=${ANYTLS_PORT:-} mode=${ANYTLS_CERT_MODE:-}
   local cert=${ANYTLS_CERT_FILE:-} key=${ANYTLS_KEY_FILE:-} email=${ANYTLS_EMAIL:-} password=${ANYTLS_PASSWORD:-}
+  local address=${ANYTLS_ADDRESS:-}
   [[ -r $APP_DIR/state ]] || die '请先创建 Lite 节点。'
   need_cmd flock
   exec 9>"$APP_DIR/manage.lock"
@@ -402,10 +501,12 @@ do_add_anytls() (
   [[ ! -e $APP_DIR/anytls.json && ! -e $UNIT_DIR/anytls-lite.service && ! -e $APP_DIR/bin/sing-box && ! -e $APP_DIR/tls && ! -e $APP_DIR/acme ]] || die '存在未记录的 AnyTLS 文件，请先检查，拒绝覆盖。'
   ANYTLS_SERVER_NAME=$domain ANYTLS_PORT=$port ANYTLS_CERT_MODE=$mode
   ANYTLS_CERT_FILE=$cert ANYTLS_KEY_FILE=$key ANYTLS_EMAIL=$email ANYTLS_PASSWORD=$password
-  if [[ -z $ANYTLS_SERVER_NAME && -t 0 ]]; then configure_anytls || return 0; fi
+  ANYTLS_ADDRESS=$address
+  if [[ -z $ANYTLS_SERVER_NAME && $ANYTLS_CERT_MODE != selfsigned && -t 0 ]]; then configure_anytls || return 0; fi
   set_protocols "$PROTOCOLS,anytls"
   validate_anytls_options
   install_packages
+  prepare_anytls_identity
   ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(openssl rand -hex 32)}
   port_free "$ANYTLS_PORT" || die "端口 $ANYTLS_PORT 已占用。"
   if [[ $ANYTLS_CERT_MODE == acme ]]; then port_free 80 || die '80 已占用，请用已有证书方式。'; fi
@@ -447,12 +548,12 @@ do_add_anytls() (
   create_anytls_user
   install -d -m 0755 "$APP_DIR/bin"
   replace_binary "$add_backup/candidate/sing-box" "$APP_DIR/bin/sing-box"
-  export PROTOCOLS ANYTLS_PORT ANYTLS_SERVER_NAME ANYTLS_PASSWORD ANYTLS_CERT_MODE ANYTLS_CERT_FILE ANYTLS_KEY_FILE ANYTLS_EMAIL
+  export PROTOCOLS ANYTLS_PORT ANYTLS_SERVER_NAME ANYTLS_PASSWORD ANYTLS_CERT_MODE ANYTLS_CERT_FILE ANYTLS_KEY_FILE ANYTLS_EMAIL ANYTLS_ADDRESS
   python3 - "$APP_DIR/state" <<'PY'
 import os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = dict(l.split('=', 1) for l in p.read_text(encoding='utf-8').splitlines())
-for k in ('PROTOCOLS', 'ANYTLS_PORT', 'ANYTLS_SERVER_NAME', 'ANYTLS_PASSWORD', 'ANYTLS_CERT_MODE', 'ANYTLS_CERT_FILE', 'ANYTLS_KEY_FILE', 'ANYTLS_EMAIL'):
+for k in ('PROTOCOLS', 'ANYTLS_PORT', 'ANYTLS_SERVER_NAME', 'ANYTLS_PASSWORD', 'ANYTLS_CERT_MODE', 'ANYTLS_CERT_FILE', 'ANYTLS_KEY_FILE', 'ANYTLS_EMAIL', 'ANYTLS_ADDRESS'):
     s[k] = os.environ[k]
 p.write_bytes(''.join(f'{k}={v}\n' for k,v in s.items()).encode('utf-8'))
 PY
@@ -477,16 +578,18 @@ do_refresh_anytls_cert() (
   flock -n 9 || die '另一项维护操作仍在运行。'
   load_state
   protocol_enabled anytls || die '未安装 AnyTLS。'
-  [[ $ANYTLS_CERT_MODE == file ]] || die 'ACME 模式由 sing-box 自动续期，无需此命令。'
-  check_anytls_certificate "$ANYTLS_CERT_FILE" "$ANYTLS_KEY_FILE"
+  [[ $ANYTLS_CERT_MODE == file || $ANYTLS_CERT_MODE == selfsigned ]] || die 'ACME 模式由 sing-box 自动续期，无需此命令。'
+  if [[ $ANYTLS_CERT_MODE == file ]]; then check_anytls_certificate "$ANYTLS_CERT_FILE" "$ANYTLS_KEY_FILE"; fi
   cert_backup=$(mktemp -d "$APP_DIR/backup-cert-$(date +%Y%m%d%H%M%S).XXXXXX")
   chmod 0700 "$cert_backup"
   cp -p "$APP_DIR/tls/fullchain.pem" "$APP_DIR/tls/privkey.pem" "$cert_backup/"
+  if [[ -f $APP_DIR/client-info.txt ]]; then cp -p "$APP_DIR/client-info.txt" "$cert_backup/"; fi
   rollback_cert() {
     local status=$?
     trap - EXIT INT TERM
     if (( status != 0 )); then
       cp -p "$cert_backup/fullchain.pem" "$cert_backup/privkey.pem" "$APP_DIR/tls/"
+      if [[ -f $cert_backup/client-info.txt ]]; then cp -p "$cert_backup/client-info.txt" "$APP_DIR/"; else rm -f "$APP_DIR/client-info.txt"; fi
       systemctl restart anytls-lite.service || log "恢复证书后服务重启失败，请检查 $cert_backup。"
       log "刷新失败，已恢复旧证书：$cert_backup"
     fi
@@ -495,13 +598,15 @@ do_refresh_anytls_cert() (
   trap rollback_cert EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  copy_anytls_certificate
+  if [[ $ANYTLS_CERT_MODE == selfsigned ]]; then generate_anytls_certificate yes; else copy_anytls_certificate; fi
   "$APP_DIR/bin/sing-box" check -c "$APP_DIR/anytls.json"
   systemctl restart anytls-lite.service
   systemctl is-active --quiet anytls-lite.service
   verify_anytls_tls
+  if [[ $ANYTLS_CERT_MODE == selfsigned ]]; then write_client_info; fi
   trap - EXIT INT TERM
   log "证书已刷新并通过验证；旧证书备份：$cert_backup"
+  if [[ $ANYTLS_CERT_MODE == selfsigned ]]; then log "公钥指纹不变；使用 PEM 信任的客户端请重新复制 $APP show 中的新公有证书。"; fi
 )
 
 write_config() {
@@ -525,7 +630,10 @@ write_config() {
   else
     XHTTP_PATH=''
   fi
-  if protocol_enabled anytls; then ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(openssl rand -hex 32)}; fi
+  if protocol_enabled anytls; then
+    prepare_anytls_identity
+    ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(openssl rand -hex 32)}
+  fi
   cat >"$APP_DIR/state" <<EOF
 PROTOCOLS=$PROTOCOLS
 VMESS_PORT=${VMESS_PORT:-}
@@ -551,6 +659,7 @@ ANYTLS_CERT_MODE=${ANYTLS_CERT_MODE:-}
 ANYTLS_CERT_FILE=${ANYTLS_CERT_FILE:-}
 ANYTLS_KEY_FILE=${ANYTLS_KEY_FILE:-}
 ANYTLS_EMAIL=${ANYTLS_EMAIL:-}
+ANYTLS_ADDRESS=${ANYTLS_ADDRESS:-}
 EOF
   chmod 0600 "$APP_DIR/state"
   if protocol_enabled anytls; then write_anytls_config; fi
@@ -686,6 +795,49 @@ wait_for_quick_domain() {
   return 1
 }
 
+anytls_selfsigned_info() {
+  local pin
+  pin=$(anytls_public_key_pin)
+  python3 - "$APP_DIR" "$pin" <<'PY'
+import ipaddress, pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+s = dict(l.split('=', 1) for l in (p/'state').read_text(encoding='utf-8').splitlines())
+ip = ipaddress.ip_address(s['ANYTLS_ADDRESS'])
+address = f'[{ip}]' if ip.version == 6 else str(ip)
+password, port = s['ANYTLS_PASSWORD'], int(s['ANYTLS_PORT'])
+if not re.fullmatch(r'[a-fA-F0-9]{64}', password) or not (port == 443 or 1024 <= port <= 65535):
+    sys.exit('AnyTLS state 中的密码或端口无效。')
+print('AnyTLS 自签 / IP 直连（无需填写 SNI；导入链接后还需信任下方公有证书）')
+print(f'anytls://{password}@{address}:{port}/?security=tls&insecure=0#anytls-selfsigned')
+print('\n公钥 SHA-256（Base64，供 sing-box 固定公钥校验）：' + sys.argv[2])
+print('v2rayN：导入后编辑节点 → TLS 证书固定/证书，粘贴下面完整 PEM；不要填写私钥，不开启跳过验证。')
+print((p/'tls/fullchain.pem').read_text(encoding='utf-8').strip())
+print('\n标准 anytls:// 链接不携带证书信任；其他客户端需要单独配置。')
+print('sing-box 1.13+ 完整客户端配置（含指纹）：speed-slayer-lite export-anytls-client')
+PY
+}
+
+do_export_anytls_client() (
+  need_root
+  load_state
+  protocol_enabled anytls && [[ $ANYTLS_CERT_MODE == selfsigned ]] || die '此命令用于导出自签 AnyTLS 的 sing-box 客户端配置。'
+  pin=$(anytls_public_key_pin)
+  python3 - "$APP_DIR/state" "$pin" <<'PY'
+import ipaddress, json, pathlib, sys
+s = dict(l.split('=', 1) for l in pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').splitlines())
+ip = str(ipaddress.ip_address(s['ANYTLS_ADDRESS']))
+c = {'log': {'level': 'warn'},
+     'inbounds': [{'type': 'mixed', 'tag': 'local', 'listen': '127.0.0.1', 'listen_port': 10808}],
+     'outbounds': [{'type': 'anytls', 'tag': 'proxy', 'server': ip, 'server_port': int(s['ANYTLS_PORT']),
+                    'password': s['ANYTLS_PASSWORD'],
+                    'tls': {'enabled': True, 'server_name': ip, 'insecure': False,
+                            'certificate_public_key_sha256': [sys.argv[2]]}}]}
+# An IP server_name suppresses wire SNI. Do not combine disable_sni with pinning:
+# sing-box 1.14.4 would additionally enforce the system CA chain in that branch.
+print(json.dumps(c, ensure_ascii=False, indent=2))
+PY
+)
+
 write_client_info() (
   local requested_address=${VMESS_ADDRESS:-} server='' domain vmess_json uri content='' label
   load_state
@@ -718,9 +870,13 @@ write_client_info() (
     content+="$label"$'\n'"$uri"$'\n\n'
   fi
   if protocol_enabled anytls; then
-    validate_domain "$ANYTLS_SERVER_NAME" || die 'state 中的 ANYTLS_SERVER_NAME 无效'
-    uri="anytls://${ANYTLS_PASSWORD}@${ANYTLS_SERVER_NAME}:${ANYTLS_PORT}/?sni=${ANYTLS_SERVER_NAME}&insecure=0#anytls"
-    content+="AnyTLS + TLS（客户端使用 sing-box / mihomo；开启证书校验）"$'\n'"$uri"$'\n\n'
+    if [[ $ANYTLS_CERT_MODE == selfsigned ]]; then
+      content+="$(anytls_selfsigned_info)"$'\n\n'
+    else
+      validate_domain "$ANYTLS_SERVER_NAME" || die 'state 中的 ANYTLS_SERVER_NAME 无效'
+      uri="anytls://${ANYTLS_PASSWORD}@${ANYTLS_SERVER_NAME}:${ANYTLS_PORT}/?sni=${ANYTLS_SERVER_NAME}&insecure=0#anytls"
+      content+="AnyTLS + TLS（客户端使用 sing-box / mihomo；开启证书校验）"$'\n'"$uri"$'\n\n'
+    fi
   fi
   tmp=$(mktemp "$APP_DIR/client-info.XXXXXX")
   trap 'rm -f -- "$tmp"' EXIT
@@ -751,7 +907,7 @@ configure_install() {
     printf '  [%s] 1. VMess + WebSocket + Argo\n' "$( [[ $ENABLE_VMESS == 1 ]] && printf x || printf ' ' )"
     printf '  [%s] 2. Shadowsocks 2022\n' "$( [[ $ENABLE_SS2022 == 1 ]] && printf x || printf ' ' )"
     printf '  [%s] 3. VLESS + XHTTP + REALITY\n' "$( [[ $ENABLE_VLESS == 1 ]] && printf x || printf ' ' )"
-    printf '  [%s] 4. AnyTLS + TLS（自己的域名和证书）\n' "$( [[ $ENABLE_ANYTLS == 1 ]] && printf x || printf ' ' )"
+    printf '  [%s] 4. AnyTLS + TLS（域名证书 / 自签 IP 直连）\n' "$( [[ $ENABLE_ANYTLS == 1 ]] && printf x || printf ' ' )"
     printf '  a. 全选  n. 清空  0. 取消  回车：确认选择\n'
     read -r -p '请选择: ' input || return 1
     case $input in
@@ -846,7 +1002,7 @@ validate_install_options() {
     if [[ $ANYTLS_CERT_MODE == acme ]]; then ACTIVE_PORTS+=(80); fi
   else
     ANYTLS_PORT='' ANYTLS_SERVER_NAME='' ANYTLS_PASSWORD='' ANYTLS_CERT_MODE=''
-    ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL=''
+    ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL='' ANYTLS_ADDRESS=''
   fi
   for port in "${ACTIVE_PORTS[@]}"; do
     port=$((10#$port))
@@ -1214,7 +1370,7 @@ menu() {
 6. 修复 VMess / Argo 隧道
 7. 旧 VLESS TCP 节点迁移到 XHTTP
 8. 为已有节点追加 AnyTLS（保留其他节点）
-9. 刷新 AnyTLS 已有证书（外部续期后）
+9. 刷新 AnyTLS 证书（外部续期 / 自签续期）
 0. 退出
 EOF
     read -r -p '请选择: ' choice || return 0
@@ -1255,8 +1411,9 @@ main() {
     migrate-xhttp) do_migrate_xhttp ;;
     add-anytls) do_add_anytls ;;
     refresh-anytls-cert) do_refresh_anytls_cert ;;
+    export-anytls-client) do_export_anytls_client ;;
     uninstall) do_uninstall "${2:-}" ;;
-    *) die "用法: $0 {menu|install|show|status|update|repair-argo|migrate-xhttp|add-anytls|refresh-anytls-cert|uninstall [--yes]}" ;;
+    *) die "用法: $0 {menu|install|show|status|update|repair-argo|migrate-xhttp|add-anytls|refresh-anytls-cert|export-anytls-client|uninstall [--yes]}" ;;
   esac
 }
 

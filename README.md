@@ -298,7 +298,7 @@ bash <(curl -fsSL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install.sh)
 ```
 
-运行后进入菜单：`1` 创建/勾选协议、`2` 查看链接、`3` 状态、`4` 更新脚本和内核、`5` 卸载、`6` 修复 Argo、`7` 旧 VLESS 迁移到 XHTTP、`8` 追加 AnyTLS、`9` 刷新 AnyTLS 已有证书、`0` 退出。安装后运行 `speed-slayer-lite` 再次打开菜单；旧版用户先运行上面的一键命令，选择 `4` 更新。
+运行后进入菜单：`1` 创建/勾选协议、`2` 查看链接、`3` 状态、`4` 更新脚本和内核、`5` 卸载、`6` 修复 Argo、`7` 旧 VLESS 迁移到 XHTTP、`8` 追加 AnyTLS、`9` 刷新外部证书或续期自签证书、`0` 退出。安装后运行 `speed-slayer-lite` 再次打开菜单；旧版用户先运行上面的一键命令，选择 `4` 更新。
 
 勾选界面输入 `1 3` 可切换 VMess/VLESS 的选中状态，回车确认；`a` 全选、`n` 清空、`0` 取消。选 VLESS 后可以使用默认 SNI `learn.microsoft.com`，或输入自定义域名。SNI 同时用于目标站、守门规则和链接；不自动创建自建网站。
 
@@ -320,13 +320,15 @@ VMess 正常但 VLESS 握手失败时，还需检查客户端启动日志中的 
 
 AnyTLS 新装在菜单 `1` 中勾选协议 `4`；**已有 Lite 节点直接选菜单 `8` 追加，无需卸载或更新原 Xray**。上传新版后使用上面的 GitHub 一键命令即可进入新菜单，追加成功会安装新版管理命令。脚本自动识别 Linux、amd64/arm64，为 AnyTLS 部署独立 `sing-box 1.14.4`，保留已有代理程序；不更换 Linux 内核。
 
-需要准备：自己的子域名（仅 DNS 解析到 VPS）、可用 TCP 端口，以及证书申请方式。交互安装优先提示 443；443 已占用或本次 VLESS 使用 443 时提示 8443，允许输入其他端口，冲突时停止。SNI 使用自己的证书域名，不能沿用 REALITY 的第三方域名。选择自动证书时填写邮箱，并保持域名正确解析、TCP 80 空闲且对公网开放；选择已有证书时填写完整链与私钥的绝对路径。密码随机生成，输出 `anytls://` 链接，默认验证证书。
+域名证书模式需要准备：自己的子域名（仅 DNS 解析到 VPS）、可用 TCP 端口，以及证书申请方式。交互安装优先提示 443；443 已占用或本次 VLESS 使用 443 时提示 8443，允许输入其他端口，冲突时停止。SNI 使用自己的证书域名，不能沿用 REALITY 的第三方域名。选择自动证书时填写邮箱，并保持域名正确解析、TCP 80 空闲且对公网开放；选择已有证书时填写完整链与私钥的绝对路径。密码随机生成，输出 `anytls://` 链接，默认验证证书。
+
+80 已被网站占用或没有域名时，选择证书方式 **`3. 自签证书（IP 直连）`**：免域名、免填 SNI/邮箱、不使用 80，输入客户端连接 IP 或回车自动检测，再选空闲端口。脚本生成证书和密码，保留现有网站及其他节点。**v2rayN 导入链接后，还需把脚本输出的完整公有证书粘贴到节点的 TLS 证书固定设置中**，SNI 留空，保持证书校验；标准链接不能携带证书信任。也可用 `speed-slayer-lite export-anytls-client` 导出含公钥指纹的完整 sing-box 客户端配置。菜单 9 支持沿用密钥续期，更新不会更换自签密钥。具体步骤见 [Lite 自签用法](speed-slayer-lite/README.md#自签证书免域名免-sni无需-80)。
 
 AnyTLS 的版本、架构选择、证书续期、已有节点追加及非交互参数，见 [Lite AnyTLS 用法](speed-slayer-lite/README.md#anytls-安装与证书)。v2rayN 使用支持 AnyTLS 的 sing-box 内核；只更新 Xray 不会增加 AnyTLS 支持。
 
 ### 上传 GitHub
 
-本次应同步提交：主版脚本、`speed-slayer-lite/install.sh`、Lite 测试入口、新增 `test-anytls.sh` / `test-anytls-loopback.py`、两份 README 和 `CHANGELOG.md`。旧修改记录保留。
+本次应同步提交：主版脚本、`speed-slayer-lite/install.sh`、`test-anytls.sh` / `test-anytls-loopback.py`、`.gitattributes`、两份 README 和 `CHANGELOG.md`。旧修改记录保留。
 
 在仓库根目录使用 `git add -A` 可以一起暂存新增、修改和删除。上传前运行 `bash speed-slayer-lite/test.sh`；测试通过后再提交并推送到 GitHub `main`，VPS 的一键命令才能下载新版本。
 
@@ -338,7 +340,7 @@ Set-Location 'C:\CC\work\speed-slayer'
 & {
     git add -A
     if ($LASTEXITCODE -ne 0) { throw '暂存失败，已停止上传' }
-    git commit -m 'feat: add AnyTLS with managed sing-box and TLS certificates'
+    git commit -m 'feat: add self-signed AnyTLS with IP access and certificate pinning'
     if ($LASTEXITCODE -ne 0) { throw '提交失败，已停止上传；请查看上方错误' }
     git push origin main
     if ($LASTEXITCODE -ne 0) { throw '推送失败，请查看上方错误' }
@@ -500,7 +502,12 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 
 ## 版本
 
-当前脚本版本：`v2.2.0`
+当前脚本版本：`v2.3.0`
+
+### v2.3.0
+
+- AnyTLS 新增自签 IP 直连，无需域名、SNI 或 80；输出公有证书与指纹配置。
+- 自签续期保留私钥和公钥指纹，新增客户端配置导出及对应回归检查。
 
 ### v2.2.0
 
@@ -520,6 +527,16 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 - 新增用法、GitHub 上传说明及修改溯源约定。
 
 ## 修改记录（溯源）
+
+### 2026-11-05 — AnyTLS 自签 IP 直连与公钥固定（v2.3.0）
+
+- **目的**：用户需要在 TCP 80 已被网站占用、或没有域名的服务器上创建 AnyTLS；新增证书方式 `3` / `ANYTLS_CERT_MODE=selfsigned`，跳过域名、SNI 和邮箱，不占用或检查 80，保留原 ACME 与已有证书模式。
+- **实现**：支持手填 `ANYTLS_ADDRESS`（IPv4/IPv6）或先 IPv4、后 IPv6 自动检测；用 Python 严格解析 IP，拒绝非法地址、回环、未指定、多播、链路本地和 scope ID。生成 ECDSA P-256、IP SAN、3650 天有效期的自签证书，私钥保留在受限目录；已有密钥不会被更新或重复生成操作替换。自签服务启动使用本机公有证书验证信任和 IP。
+- **客户端**：输出 IP 形式的 `anytls://` 链接，省略 SNI，保留 `insecure=0`；同时输出完整公有 PEM 与公钥 SHA-256 Base64，不输出私钥。按 v2rayN `7.25.6` 源码补充导入链接后粘贴公有证书的步骤；标准 URI 不携带证书信任。新增 `export-anytls-client`，导出含 `certificate_public_key_sha256` 的完整 sing-box 客户端配置，自动使用 IP 作为校验地址且不发送域名 SNI，本地 HTTP/SOCKS 只监听 `127.0.0.1:10808`。相关上游链接见 Lite README。
+- **维护**：菜单 9 / `refresh-anytls-cert` 支持沿用原私钥续期自签证书，公钥指纹与节点密码保持不变；失败恢复旧证书和节点信息，仅重启 AnyTLS。成功续期后 PEM 信任客户端需更新公有证书。现有域名证书节点不自动转换；更新、备份、卸载及保留原节点追加继续适用。
+- **涉及文件**：Lite `install.sh`、`test-anytls.sh`、`test-anytls-loopback.py`，主版脚本版本号、两份 README、`CHANGELOG.md`、`.gitattributes`。强制 Python 标准输出 UTF-8，避免 Windows 下中文节点信息出现本地编码；Python 测试文件及 Git 属性文件固定 LF。README 同步补充自签安装、客户端证书信任、配置导出、续期、限制与 GitHub 上传命令，历史记录完整保留。
+- **验证**：7 个 Bash 文件语法、Python 语法、版本入口、UTF-8/LF、Git 空白检查通过；**13 项 XHTTP + 23 项原管理 + 39 项 AnyTLS 检查，共 75 项通过**。使用真实 Windows Xray `26.10.21` / sing-box `1.14.4` 校验配置；实际 AnyTLS 回环验证公有 PEM 信任与公钥固定成功代理 HTTP，错误指纹、错误密码、不受信证书拒绝；检查转发的 ClientHello，确认没有 SNI 扩展。直接运行脚本内的 Python TLS 检查逻辑也通过。另覆盖 IPv4/IPv6 SAN、自动检测、无效地址、80 占用下新装/追加、证书与密钥持久性、续期及更新失败恢复、卸载清理；未重新下载或更换原固定内核版本。
+- **未验证与边界**：包管理、下载、IP 自动查询及 systemd 操作在生命周期测试中使用替身；未操作用户 VPS，Linux 实际权限/监听、公网线路、IPv6 实际代理、v2rayN GUI 导入以及长期运行未实测。无 SNI 和自签不保证避免封锁；导出配置含访问密码，应仅交给自己的客户端。公网入口 IP 改变需要同步处理证书 IP SAN 和客户端，普通更新不会自动更改地址。
 
 ### 2026-11-05 — 接入 AnyTLS、独立 sing-box 与可信证书管理（v2.2.0）
 

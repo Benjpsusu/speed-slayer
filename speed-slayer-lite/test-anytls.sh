@@ -42,6 +42,7 @@ create_anytls_user() { mkdir -p "$APP_DIR/tls" "$APP_DIR/acme"; chmod 0711 "$APP
 create_users() { mkdir -p "$APP_DIR"; if protocol_enabled anytls; then create_anytls_user; fi; }
 port_free() { [[ $1 != "${BUSY_PORT:-none}" ]]; }
 public_ip() { [[ ! -f $TEST_ROOT/fail-info ]] || return 1; echo 203.0.113.15; }
+detect_anytls_ip() { [[ ! -f $TEST_ROOT/fail-ip ]] || return 1; echo 203.0.113.15; }
 quick_domain() { echo fixture.trycloudflare.com; }
 wait_for_quick_domain() { :; }
 verify_anytls_tls() { [[ ! -f $TEST_ROOT/fail-tls ]]; }
@@ -113,6 +114,7 @@ fixture() {
   ARGO_MODE=token ARGO_DOMAIN=tunnel.example.com ARGO_TOKEN=test-token
   ANYTLS_PORT=18443 ANYTLS_SERVER_NAME=at.example.test ANYTLS_PASSWORD=''
   ANYTLS_CERT_MODE=${2:-file} ANYTLS_EMAIL=test@example.com
+  ANYTLS_ADDRESS=${TEST_ANYTLS_IP:-203.0.113.15}
   ANYTLS_CERT_FILE="$TEST_ROOT/certs/cert.pem" ANYTLS_KEY_FILE="$TEST_ROOT/certs/key.pem"
   validate_install_options
   create_users
@@ -195,7 +197,7 @@ ANYTLS_PASSWORD='bad&password' expect_failure validate_anytls_options
 pass 'wrong SNI/key, invalid email/password and port collision rejected'
 
 unset ANYTLS_PORT
-BUSY_PORT=443 configure_install >"$TEST_ROOT/ui.log" <<< $'4\n\nat.example.test\n\n2\n'"$TEST_ROOT/certs/cert.pem"$'\n'"$TEST_ROOT/certs/key.pem"
+BUSY_PORT=443 configure_install >"$TEST_ROOT/ui.log" <<< $'4\n\n2\nat.example.test\n\n'"$TEST_ROOT/certs/cert.pem"$'\n'"$TEST_ROOT/certs/key.pem"
 [[ $PROTOCOLS == anytls && $ANYTLS_PORT == 8443 && $ANYTLS_CERT_MODE == file ]] || fail 'AnyTLS UI'
 pass 'checkbox AnyTLS-only and occupied 443 default to 8443 with file-certificate input'
 
@@ -287,4 +289,125 @@ if [[ -n ${SPEED_TEST_SINGBOX:-} ]]; then
 else
   printf 'SKIP real AnyTLS connection; set SPEED_TEST_SINGBOX to enable.\n'
 fi
+
+unset ANYTLS_PORT ANYTLS_ADDRESS
+BUSY_PORT=80 configure_install >"$TEST_ROOT/ui.log" <<< $'4\n\n3\n\n8443\n'
+validate_install_options
+prepare_anytls_identity
+[[ $ANYTLS_CERT_MODE == selfsigned && $ANYTLS_ADDRESS == 203.0.113.15 && -z $ANYTLS_SERVER_NAME && -z $ANYTLS_EMAIL ]] || fail 'self-signed UI'
+[[ ${ACTIVE_PORTS[*]} == 8443 ]] || fail 'self-signed checked ACME port'
+pass 'self-signed checkbox flow skips domain/SNI/email, auto-detects IP and does not reserve 80'
+
+for address in 203.0.113.15 2001:db8::15; do
+  TEST_ANYTLS_IP=$address fixture anytls selfsigned
+  "$APP_DIR/bin/sing-box" check -c "$APP_DIR/anytls.json" >"$TEST_ROOT/operation.log" 2>&1
+  do_export_anytls_client >"$TEST_ROOT/pinned-client.json"
+  "$APP_DIR/bin/sing-box" check -c "$TEST_ROOT/pinned-client.json" >"$TEST_ROOT/operation.log" 2>&1
+  python3 - "$APP_DIR" "$TEST_ROOT/pinned-client.json" "$address" <<'PY'
+import base64, hashlib, ipaddress, json, pathlib, subprocess, sys, urllib.parse
+p=pathlib.Path(sys.argv[1]); address=sys.argv[3]
+c=json.loads((p/'anytls.json').read_text(encoding='utf-8'))['inbounds'][0]
+client=json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')); out=client['outbounds'][0]
+info=(p/'client-info.txt').read_text(encoding='utf-8')
+link=next(l for l in info.splitlines() if l.startswith('anytls://'))
+u=urllib.parse.urlsplit(link); q=urllib.parse.parse_qs(u.query)
+assert u.hostname==address and 'sni' not in q and q['insecure']==['0']
+assert 'server_name' not in c['tls'] and 'certificate_provider' not in c['tls']
+assert out['server']==out['tls']['server_name']==address
+assert out['password']==c['users'][0]['password']==u.username
+assert out['tls']['insecure'] is False and client['inbounds'][0]['listen']=='127.0.0.1'
+assert 'disable_sni' not in out['tls']
+pub=subprocess.run(['openssl','x509','-in',str(p/'tls/fullchain.pem'),'-pubkey','-noout'],check=True,capture_output=True).stdout
+der=subprocess.run(['openssl','pkey','-pubin','-outform','DER'],input=pub,check=True,capture_output=True).stdout
+pin=base64.b64encode(hashlib.sha256(der).digest()).decode()
+assert out['tls']['certificate_public_key_sha256']==[pin] and pin in info
+assert 'BEGIN CERTIFICATE' in info and 'PRIVATE KEY' not in info
+assert 'BEGIN CERTIFICATE' not in json.dumps(client) and 'PRIVATE KEY' not in json.dumps(client)
+PY
+  generate_anytls_certificate
+  cmp "$APP_DIR/tls/privkey.pem" "$TEST_ROOT/golden/privkey.pem"
+  cmp "$APP_DIR/tls/fullchain.pem" "$TEST_ROOT/golden/fullchain.pem"
+  ANYTLS_ADDRESS=203.0.113.99 expect_failure check_anytls_certificate "$APP_DIR/tls/fullchain.pem" "$APP_DIR/tls/privkey.pem"
+  pass "self-signed $address: certificate SAN, URI, actual core configs and persistent key"
+done
+
+for address in 999.2.3.4 2001:::1 127.0.0.1 0.0.0.0 ff02::1 fe80::1; do
+  ANYTLS_ADDRESS=$address expect_failure prepare_anytls_identity
+done
+ANYTLS_ADDRESS=example.com expect_failure validate_anytls_options
+ANYTLS_ADDRESS='2001:db8::1%eth0' expect_failure validate_anytls_options
+touch "$TEST_ROOT/fail-ip"
+ANYTLS_ADDRESS='' expect_failure prepare_anytls_identity
+rm "$TEST_ROOT/fail-ip"
+pass 'invalid/scoped/unusable IP and failed auto-detection rejected'
+
+fixture anytls selfsigned
+for fault in config start tls; do
+  touch "$TEST_ROOT/fail-$fault"
+  expect_failure apply_update
+  assert_saved
+  cmp "$APP_DIR/tls/privkey.pem" "$TEST_ROOT/golden/privkey.pem"
+  cmp "$APP_DIR/tls/fullchain.pem" "$TEST_ROOT/golden/fullchain.pem"
+  rm -f "$TEST_ROOT/fail-$fault"
+done
+apply_update >"$TEST_ROOT/operation.log" 2>&1
+cmp "$APP_DIR/state" "$TEST_ROOT/golden/state"
+cmp "$APP_DIR/tls/privkey.pem" "$TEST_ROOT/golden/privkey.pem"
+cmp "$APP_DIR/tls/fullchain.pem" "$TEST_ROOT/golden/fullchain.pem"
+pass 'self-signed update success/failures keep certificate, private key, pin and credentials'
+
+fixture anytls selfsigned
+for fault in config start tls; do
+  touch "$TEST_ROOT/fail-$fault"
+  expect_failure do_refresh_anytls_cert
+  assert_saved
+  cmp "$APP_DIR/tls/privkey.pem" "$TEST_ROOT/golden/privkey.pem"
+  cmp "$APP_DIR/tls/fullchain.pem" "$TEST_ROOT/golden/fullchain.pem"
+  rm -f "$TEST_ROOT/fail-$fault"
+done
+before_pin=$(anytls_public_key_pin)
+do_refresh_anytls_cert >"$TEST_ROOT/operation.log" 2>&1
+[[ $(anytls_public_key_pin) == "$before_pin" ]] || fail 'renewal rotated pin'
+cmp "$APP_DIR/tls/privkey.pem" "$TEST_ROOT/golden/privkey.pem"
+cmp "$APP_DIR/state" "$TEST_ROOT/golden/state"
+! cmp -s "$APP_DIR/tls/fullchain.pem" "$TEST_ROOT/golden/fullchain.pem" || fail 'certificate not renewed'
+pass 'self-signed renewal keeps key/pin/password, refreshes public certificate and rolls back failures'
+
+for fault in none tls; do
+  fixture vless
+  ANYTLS_CERT_MODE=selfsigned ANYTLS_ADDRESS=203.0.113.15 ANYTLS_PORT=18443
+  if [[ $fault == none ]]; then
+    BUSY_PORT=80 do_add_anytls >"$TEST_ROOT/operation.log" 2>&1
+    cmp "$APP_DIR/xray.json" "$TEST_ROOT/golden/xray.json"
+    grep -qx 'ANYTLS_CERT_MODE=selfsigned' "$APP_DIR/state"
+    grep -qx 'ANYTLS_SERVER_NAME=' "$APP_DIR/state"
+  else
+    touch "$TEST_ROOT/fail-$fault"
+    expect_failure do_add_anytls
+    assert_saved
+    [[ ! -e $APP_DIR/tls ]] || fail 'failed addition left private key'
+  fi
+  ! grep -qE '(restart|disable|enable).*xray-lite|cloudflared-lite' "$TEST_ROOT/services.log" || fail 'touched existing services'
+done
+pass 'self-signed addition works with busy 80; failure preserves VLESS and removes generated key'
+
+fixture anytls selfsigned
+do_export_anytls_client >"$TEST_ROOT/pinned-client.json"
+if [[ -n ${SPEED_TEST_SINGBOX:-} ]]; then
+  python3 "$TEST_DIR/test-anytls-loopback.py" "$SPEED_TEST_SINGBOX" "$APP_DIR" "$APP_DIR/tls/fullchain.pem" "$TEST_ROOT/pinned-client.json" "$TEST_ROOT/installer.sh"
+  pass 'real self-signed IP TLS: pin/PEM trust, no SNI on wire, bad pin/password/untrusted rejection'
+else
+  printf 'SKIP real self-signed connections; set SPEED_TEST_SINGBOX to enable.\n'
+fi
+do_uninstall --yes >"$TEST_ROOT/operation.log"
+[[ ! -e $APP_DIR && -s $BIN_DIR/sing-box ]] || fail 'self-signed uninstall'
+pass 'self-signed uninstall removes generated certificate/key while keeping shared binaries'
+PROTOCOLS=anytls ANYTLS_CERT_MODE=selfsigned ANYTLS_ADDRESS='' ANYTLS_PORT=18443 ANYTLS_PASSWORD=''
+BUSY_PORT=80 do_install >"$TEST_ROOT/operation.log" 2>&1
+trap cleanup EXIT
+grep -qx 'ANYTLS_CERT_MODE=selfsigned' "$APP_DIR/state"
+grep -qx 'ANYTLS_ADDRESS=203.0.113.15' "$APP_DIR/state"
+[[ -s $APP_DIR/tls/privkey.pem && ! -e $APP_DIR/xray.json ]] || fail 'fresh self-signed install'
+do_uninstall --yes >"$TEST_ROOT/operation.log"
+pass 'fresh self-signed installation auto-detects IP and succeeds with occupied port 80'
 printf 'AnyTLS: %s checks passed; package manager/systemd/downloads mocked.\n' "$passed"

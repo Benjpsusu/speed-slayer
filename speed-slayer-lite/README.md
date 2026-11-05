@@ -5,7 +5,7 @@
 - VMess + WebSocket + Cloudflare Tunnel
 - Shadowsocks 2022（`2022-blake3-aes-128-gcm`）
 - VLESS + XHTTP + REALITY（随机路径、`mode=auto`、Flow 留空）
-- AnyTLS + TLS（独立 sing-box、自己的域名、可信证书）
+- AnyTLS + TLS（独立 sing-box；域名证书或自签 IP 直连）
 
 未勾选的协议不生成入站或节点链接。只有勾选 VMess 才下载 cloudflared、创建其账户/配置并启动 Argo。不安装 Nginx，不提供 HTTP 订阅。
 
@@ -31,7 +31,7 @@ bash <(curl -fsSL --proto '=https' --tlsv1.2 \
 6. 修复 VMess / Argo 隧道
 7. 旧 VLESS TCP 节点迁移到 XHTTP
 8. 为已有节点追加 AnyTLS（保留其他节点）
-9. 刷新 AnyTLS 已有证书（外部续期后）
+9. 刷新 AnyTLS 证书（外部续期 / 自签续期）
 0. 退出
 ```
 
@@ -47,7 +47,7 @@ bash <(curl -fsSL --proto '=https' --tlsv1.2 \
 [ ] 1. VMess + WebSocket + Argo
 [ ] 2. Shadowsocks 2022
 [ ] 3. VLESS + XHTTP + REALITY
-[ ] 4. AnyTLS + TLS（自己的域名和证书）
+[ ] 4. AnyTLS + TLS（域名证书 / 自签 IP 直连）
 
 a. 全选  n. 清空  0. 取消  回车：确认选择
 ```
@@ -81,7 +81,7 @@ SNI 输入会检查域名格式，但不代表目标站的 TLS 1.3/HTTP/2 支持
 - 已有新版管理命令：执行 `sudo speed-slayer-lite add-anytls`。
 - 重复追加会拒绝覆盖；需要升级已有 AnyTLS 时选菜单 `4`。追加失败会恢复原 state/管理脚本/链接，停止并清理本次 AnyTLS，保留备份；若新增服务无法停止，保留文件并报告备份供手动处理。
 
-填写自己的子域名，例如 `at.example.com`，设置 A/AAAA 到 VPS（只发布实际可达的地址）；使用 Cloudflare DNS 时选择“仅 DNS”，普通网站橙云不承载原生 AnyTLS。SNI 固定为该证书域名，不使用 `learn.microsoft.com` 等第三方站点。安装无需搭建网站。
+证书方式 `1` / `2` 使用自己的子域名，例如 `at.example.com`，设置 A/AAAA 到 VPS（只发布实际可达的地址）；使用 Cloudflare DNS 时选择“仅 DNS”，普通网站橙云不承载原生 AnyTLS。SNI 固定为该证书域名，不使用 `learn.microsoft.com` 等第三方站点。安装无需搭建网站。方式 `3` 自签模式使用 IP，跳过域名、SNI 和邮箱输入。
 
 交互提示端口：443 空闲且未分配给所选 VLESS 时默认 443，否则默认 8443；用户可以修改。最终会检查端口冲突，不接管 Caddy/Nginx 已占用的端口。非交互默认 8443，建议明确传入 `ANYTLS_PORT`。
 
@@ -96,6 +96,35 @@ sudo speed-slayer-lite refresh-anytls-cert
 ```
 
 该命令验证并更新副本，只重启 AnyTLS，验证失败恢复旧副本。可以把命令加入已有证书工具的成功续期 hook；不修改其配置或删除源证书。需要 DNS-01、80 已被网站占用等场景请选择此方式。
+
+### 自签证书：免域名、免 SNI、无需 80
+
+**3. 自签证书（IP 直连）**：适合 80 被网站占用或没有域名的服务器。新建或追加 AnyTLS 时，先选证书方式 `3`，填写客户端连接的公网 IPv4/IPv6（不带方括号和端口），或直接回车自动检测。自动检测优先查询公网 IPv4，失败后尝试 IPv6；NAT、多个公网地址或出站 IP 与入口不同的服务器应手动填写实际入口 IP。该模式不申请公共 CA 证书，不需要 DNS、邮箱或 TCP 80。
+
+选择可用 TCP 端口，例如 `8443`；现有 Caddy/Nginx 可以继续使用 80/443。脚本生成 ECDSA P-256 自签证书，证书的 IP SAN 对应所选地址，有效期 3650 天；私钥只保存在服务器受限目录。启动验证使用这张公有证书作为信任锚，并检查 IP 和有效期。更新保留证书、私钥与密码，卸载删除自签证书及私钥。
+
+**v2rayN 7.25.6 使用步骤：**
+
+1. 导入脚本输出的 `anytls://` 链接，地址为服务器 IP，选择支持 AnyTLS 的 sing-box 内核。
+2. 编辑该节点，在 TLS 的“证书固定/证书”设置中，粘贴脚本输出的完整公有 PEM（包含 `BEGIN CERTIFICATE` 和 `END CERTIFICATE` 两行）。只信任通过自己的 SSH 会话取得的证书，不填写或复制服务器私钥。
+3. SNI 留空，TLS 保持启用，“跳过证书验证”关闭。保存并连接。IP 地址不会作为域名 SNI 发送。
+
+依据：[v2rayN 7.25.6 节点编辑界面](https://github.com/2dust/v2rayN/blob/7.25.6/v2rayN/v2rayN/Views/AddServerWindow.xaml)、[sing-box 出站生成代码](https://github.com/2dust/v2rayN/blob/7.25.6/v2rayN/ServiceLib/Services/CoreConfig/Singbox/SingboxOutboundService.cs)。这条 GUI 路径按源码确认，未在用户的 v2rayN 界面实测。原生内核的 PEM 信任与 IP 无 SNI 连接另有回环测试。
+
+**链接本身不包含证书信任。** [AnyTLS 标准 URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md)没有可通用导入的证书/公钥指纹字段；脚本不会假设客户端支持自定义参数，也不会输出 `insecure=1` 来绕过验证。未粘贴公有证书时，普通链接连接自签节点会报证书不受信任。`show` 可重新查看公有证书和公钥 SHA-256（Base64）指纹。
+
+**sing-box 原生配置：** 在服务器以 root 导出完整配置，安全复制到客户端：
+
+```bash
+umask 077
+speed-slayer-lite export-anytls-client > /root/anytls-client.json
+```
+
+导出内容含密码和 `certificate_public_key_sha256`，没有私钥；使用 sing-box **1.13+**（本次验证为 `1.14.4`）。客户端运行 `sing-box run -c anytls-client.json`，提供 `127.0.0.1:10808` HTTP/SOCKS 代理，确保本地端口空闲。该配置使用固定公钥认证服务器；`server_name` 自动设为 IP，因此不发送域名 SNI，无需用户填写。v2rayN 普通分享链接的参数不能替代这份配置中的公钥固定字段。
+
+自签证书不会通过 ACME 自动续期；到期前可运行菜单 `9` / `speed-slayer-lite refresh-anytls-cert`，沿用原私钥生成新证书，只重启 AnyTLS，失败恢复旧证书和节点信息。公钥指纹保持不变，使用 PEM 信任的客户端请重新复制新公有证书。服务器入口 IP 改变时还需要相应调整证书 IP SAN 和客户端地址，更新命令不会自动改写已保存的入口 IP。
+
+已有域名证书模式不会因更新自动转换为自签；本版自签入口用于新建或追加尚未安装的 AnyTLS。重复追加仍拒绝覆盖现有 AnyTLS。
 
 ### 非交互示例
 
@@ -116,7 +145,21 @@ ANYTLS_SERVER_NAME=at.example.com ANYTLS_PORT=8443 ANYTLS_CERT_MODE=file \
   bash install.sh add-anytls
 ```
 
-`ANYTLS_PASSWORD` 默认自动生成 32 字节随机数并以 64 位十六进制保存；自动化可显式传入同格式密码。更新、证书刷新均保留密码。`show` 输出 `anytls://` 链接，包含域名、端口、SNI 和 `insecure=0`。客户端必须使用支持 AnyTLS 的内核；[v2rayN 7.25.6 的内核映射](https://github.com/2dust/v2rayN/blob/7.25.6/v2rayN/ServiceLib/Global.cs)将 AnyTLS 指向 sing-box，更新 Xray 本身不会增加此协议。不要关闭证书校验来掩盖域名/证书错误。
+自签模式新安装（把示例 IP 换成自己的入口 IP；省略 `ANYTLS_ADDRESS` 则自动检测）：
+
+```bash
+PROTOCOLS=anytls ANYTLS_CERT_MODE=selfsigned ANYTLS_ADDRESS=203.0.113.10 \
+  ANYTLS_PORT=8443 bash install.sh install
+```
+
+已有 Lite 追加自签 AnyTLS：
+
+```bash
+ANYTLS_CERT_MODE=selfsigned ANYTLS_ADDRESS=203.0.113.10 ANYTLS_PORT=8443 \
+  bash install.sh add-anytls
+```
+
+`ANYTLS_PASSWORD` 默认自动生成 32 字节随机数并以 64 位十六进制保存；自动化可显式传入同格式密码。更新、证书刷新均保留密码。`show` 输出 `anytls://` 链接，域名模式包含域名/SNI，自签模式使用 IP 且省略 SNI；均含 `insecure=0`。客户端必须使用支持 AnyTLS 的内核；[v2rayN 7.25.6 的内核映射](https://github.com/2dust/v2rayN/blob/7.25.6/v2rayN/ServiceLib/Global.cs)将 AnyTLS 指向 sing-box，更新 Xray 本身不会增加此协议。不要关闭证书校验来掩盖域名/证书错误。
 
 AnyTLS 独立服务以 `speed-anytls` 账户运行，只在绑定 443 或自动证书需要 80 时授予绑定低端口能力。更新保留选定端口、密码和证书方式；卸载删除 Lite 自有的服务、二进制、证书副本和 ACME 数据，保留共享程序与外部源证书。
 
@@ -134,7 +177,7 @@ sudo speed-slayer-lite update
 - 候选内核先执行配置校验，通过后替换二进制、更新管理脚本并重启相关服务。
 - 保留协议选择、端口、SNI、UUID、密钥和路径；不会把旧 TCP/Vision 配置自动改为 XHTTP。
 - 下载/校验失败时不切换；切换后服务启动、获取 Quick Tunnel 域名或节点信息生成失败，会尝试恢复旧内核和管理脚本。自动恢复失败会报告备份位置。
-- AnyTLS 更新同时备份其配置、证书副本和 ACME 数据；候选 sing-box 先校验配置，重启后验证本机 TLS 证书链及域名。失败恢复旧内核/管理脚本；ACME 运行期间正常续期的数据保留，证书备份供手动恢复使用。
+- AnyTLS 更新同时备份其配置、证书副本和 ACME 数据；候选 sing-box 先校验配置，重启后验证本机 TLS 证书链及域名；自签模式信任本机证书并检查证书 IP。失败恢复旧内核/管理脚本；ACME 运行期间正常续期的数据保留，证书备份供手动恢复使用。
 - 重启会短暂断开连接，Quick Tunnel 域名可能改变。更新完成后查看输出；域名变化时重新导入 VMess 链接。恢复旧内核后域名也可能变化，应运行 `show` 刷新。
 
 选择菜单 `5` 卸载，需要输入 `y` 确认，直接回车取消。也可以：
@@ -162,7 +205,7 @@ VMess 经 Cloudflare 接入时客户端使用 443，服务器源站端口无需�
 
 ## 命令行与自动安装
 
-不带参数进入菜单。显式 `install` 在交互终端且未设置 `PROTOCOLS` 时也会显示勾选；自动化建议始终明确设置 `PROTOCOLS`。非交互 `install` 未指定协议时，为兼容旧用法仍选择原来的三种协议，不自动加入需要域名/证书的 AnyTLS。
+不带参数进入菜单。显式 `install` 在交互终端且未设置 `PROTOCOLS` 时也会显示勾选；自动化建议始终明确设置 `PROTOCOLS`。非交互 `install` 未指定协议时，为兼容旧用法仍选择原来的三种协议，不自动加入 AnyTLS；需要显式选择并设置证书方式。
 
 只安装 VLESS，使用自定义 SNI 和端口：
 
@@ -234,9 +277,9 @@ v2rayN `7.7.1` 的[官方链接解析代码](https://github.com/2dust/v2rayN/blo
 bash speed-slayer-lite/test.sh
 ```
 
-需要 Bash、Python 3、OpenSSL。默认隔离系统服务和下载；设置 `SPEED_TEST_XRAY=/path/to/xray` 可用真实内核校验配置；设置 `SPEED_TEST_SINGBOX=/path/to/sing-box` 可校验 AnyTLS 配置并运行本机回环连接测试（临时受信证书、正确/错误密码、SNI 与信任链）。Windows 可通过 PowerShell 7 调用 Git Bash，设置 `SPEED_TEST_PYTHON` 指向 Python 可执行文件。测试不操作真实 systemd 服务。
+需要 Bash、Python 3、OpenSSL。默认隔离系统服务和下载；设置 `SPEED_TEST_XRAY=/path/to/xray` 可用真实内核校验配置；设置 `SPEED_TEST_SINGBOX=/path/to/sing-box` 可校验 AnyTLS 配置并运行本机回环连接测试（临时受信证书、正确/错误密码、SNI 与信任链，以及自签 IP、公钥固定和不发送 SNI）。Windows 可通过 PowerShell 7 调用 Git Bash，设置 `SPEED_TEST_PYTHON` 指向 Python 可执行文件。测试不操作真实 systemd 服务。
 
-上传 GitHub 时同步上传主版脚本、Lite 安装脚本、`test.sh`、新增 `test-anytls.sh` / `test-anytls-loopback.py`、两份 README 和 CHANGELOG。原 XHTTP/管理测试继续保留。可复制的 PowerShell 7 提交/推送命令见[根 README 的上传 GitHub](../README.md#上传-github)。
+上传 GitHub 时同步上传主版脚本、Lite 安装脚本、`test-anytls.sh` / `test-anytls-loopback.py`、`.gitattributes`、两份 README 和 CHANGELOG。原 XHTTP/管理测试继续保留。可复制的 PowerShell 7 提交/推送命令见[根 README 的上传 GitHub](../README.md#上传-github)。
 
 ### VMess 单独不通：检查系统时间
 
@@ -271,6 +314,15 @@ sudo timedatectl status
 Quick Tunnel 适合测试，域名可能随重启变化。需要稳定域名时使用命名 Tunnel；参考 [Quick Tunnels 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)。
 
 ## 修改记录（溯源）
+
+### 2026-11-05 — 自签证书、免 SNI 的 IP 直连
+
+- 按用户要求新增证书方式 `3` / `selfsigned`，不需要域名、SNI、邮箱或 TCP 80；支持手填或自动检测 IPv4/IPv6，严格校验地址，生成包含 IP SAN 的 ECDSA 自签证书。原来的 ACME 和外部证书方式保留。
+- `show` 输出 IP 链接、公有 PEM 与公钥指纹，分享链接保持 `insecure=0`；v2rayN 导入后需要另行粘贴公有证书。新增 `export-anytls-client` 导出完整 sing-box 公钥固定配置，连接时不发送域名 SNI；不导出私钥。
+- 自签证书有效期 3650 天；菜单 9 沿用原密钥续期，保留公钥指纹和密码，失败恢复旧证书/节点信息。更新保留证书，卸载清理自有证书和私钥；原节点不自动转换证书模式。
+- 涉及本目录 `install.sh`、两份 AnyTLS 测试、两份 README、主版版本号、CHANGELOG 和 `.gitattributes`；补充 UTF-8 标准输出、LF 约定、自签用法、客户端信任与 GitHub 上传说明，历史记录保留。
+- 验证：7 个 Bash 语法、Python 语法、版本、UTF-8/LF 和 Git 空白检查通过；13 项 XHTTP、23 项原管理、39 项 AnyTLS 检查通过（共 75 项）。真实 Windows sing-box `1.14.4` 完成公有证书/公钥固定的 HTTP 代理，错误指纹、密码和未受信证书被拒绝；ClientHello 确认没有 SNI，脚本 TLS 检查逻辑通过。IPv4/IPv6 SAN、80 冲突不影响自签、追加、续期、更新失败恢复和卸载均有隔离验证。
+- 未验证：Linux VPS 实际 systemd/权限/监听、公网与 IPv6 代理、v2rayN 界面导入和长期表现。生命周期的包管理、下载、IP 查询及系统服务使用替身；本次未修改用户服务器，也未更新固定代理内核版本。完整结果和边界见根 README 同日记录。
 
 ### 2026-11-05 — AnyTLS 协议与独立 sing-box 管理
 

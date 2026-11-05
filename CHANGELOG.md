@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## v2.3.0 - 2026-11-05
+
+- AnyTLS 证书方式新增 `selfsigned`：IP 直连，无需域名/SNI/邮箱，不使用 TCP 80；支持自动检测或指定 IPv4/IPv6。
+- 生成包含 IP SAN 的自签证书；输出公有 PEM 和公钥指纹，新增 `export-anytls-client` 导出 sing-box 公钥固定配置。分享链接保留 `insecure=0`，客户端需单独导入证书信任。
+- 菜单 9 支持沿用原私钥续期自签证书；更新保留证书、私钥、密码，失败恢复；现有域名证书模式不自动转换。
+- 扩展交互、地址校验、证书持久性、续期恢复及真实无 SNI / 公钥固定连接测试；验证结果与未验证项见 README 同日记录。
+
 ## v2.2.0 - 2026-11-05
 
 - Lite 新增 AnyTLS 协议勾选和独立 sing-box 服务；自动选择 Linux amd64/arm64 包并核对 SHA-256，固定 sing-box 1.14.4，保留原 Xray/cloudflared 版本。
