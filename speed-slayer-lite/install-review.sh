@@ -50,7 +50,7 @@ set_protocols() {
   local value=$1 item
   local -a items=()
   [[ -n $value && $value != ,* && $value != *, && $value != *,,* ]] || return 1
-  ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0
+  ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0 ENABLE_XHTTPCDN=0
   IFS=',' read -r -a items <<<"$value"
   for item in "${items[@]}"; do
     case $item in
@@ -58,6 +58,7 @@ set_protocols() {
       ss2022) ENABLE_SS2022=1 ;;
       vless) ENABLE_VLESS=1 ;;
       anytls) ENABLE_ANYTLS=1 ;;
+      xhttpcdn) ENABLE_XHTTPCDN=1 ;;
       *) return 1 ;;
     esac
   done
@@ -66,6 +67,7 @@ set_protocols() {
   [[ $ENABLE_SS2022 == 0 ]] || PROTOCOLS="${PROTOCOLS:+$PROTOCOLS,}ss2022"
   [[ $ENABLE_VLESS == 0 ]] || PROTOCOLS="${PROTOCOLS:+$PROTOCOLS,}vless"
   [[ $ENABLE_ANYTLS == 0 ]] || PROTOCOLS="${PROTOCOLS:+$PROTOCOLS,}anytls"
+  [[ $ENABLE_XHTTPCDN == 0 ]] || PROTOCOLS="${PROTOCOLS:+$PROTOCOLS,}xhttpcdn"
   [[ -n $PROTOCOLS ]]
 }
 
@@ -75,11 +77,23 @@ protocol_enabled() {
     ss2022) [[ ${ENABLE_SS2022:-1} == 1 ]] ;;
     vless) [[ ${ENABLE_VLESS:-1} == 1 ]] ;;
     anytls) [[ ${ENABLE_ANYTLS:-0} == 1 ]] ;;
+    xhttpcdn) [[ ${ENABLE_XHTTPCDN:-0} == 1 ]] ;;
     *) return 1 ;;
   esac
 }
 
-xray_enabled() { protocol_enabled vmess || protocol_enabled ss2022 || protocol_enabled vless; }
+xray_enabled() { protocol_enabled vmess || protocol_enabled ss2022 || protocol_enabled vless || protocol_enabled xhttpcdn; }
+# Protocols served by the shared xray-lite process besides the CDN inbound itself.
+xray_needed_without_cdn() { protocol_enabled vmess || protocol_enabled ss2022 || protocol_enabled vless; }
+cloudflared_needed() { protocol_enabled vmess || protocol_enabled xhttpcdn; }
+# Print $PROTOCOLS without $1; order-independent, unlike ${PROTOCOLS%,name}.
+protocols_without() {
+  local item out=''
+  local -a items=()
+  IFS=',' read -r -a items <<<"$PROTOCOLS"
+  for item in "${items[@]}"; do [[ $item == "$1" ]] || out="${out:+$out,}$item"; done
+  printf '%s' "$out"
+}
 
 load_state() {
   [[ -r $APP_DIR/state ]] || die '尚未安装，请先从菜单创建节点。'
@@ -91,12 +105,13 @@ load_state() {
   ARGO_MODE='' ARGO_DOMAIN=''
   ANYTLS_PORT='' ANYTLS_SERVER_NAME='' ANYTLS_PASSWORD='' ANYTLS_CERT_MODE=''
   ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL='' ANYTLS_ADDRESS=''
+  CDN_DOMAIN='' CDN_ADDRESS='' CDN_PORT='' CDN_UUID='' CDN_PATH=''
   while IFS='=' read -r key value; do
     [[ -n $key && ! ${seen[$key]+yes} ]] || die 'state 包含空字段或重复字段。'
     seen[$key]=1
     case $key in
       PROTOCOLS) stored_protocols=$value ;;
-      VMESS_PORT|SS_PORT|REALITY_PORT|REALITY_GUARD_PORT|VMESS_ADDRESS|VMESS_UUID|VLESS_UUID|WS_PATH|VLESS_TRANSPORT|XHTTP_PATH|SS_PASSWORD|REALITY_SERVER_NAME|REALITY_PUBLIC|REALITY_SHORT_ID|ARGO_MODE|ARGO_DOMAIN|ANYTLS_PORT|ANYTLS_SERVER_NAME|ANYTLS_PASSWORD|ANYTLS_CERT_MODE|ANYTLS_CERT_FILE|ANYTLS_KEY_FILE|ANYTLS_EMAIL|ANYTLS_ADDRESS)
+      VMESS_PORT|SS_PORT|REALITY_PORT|REALITY_GUARD_PORT|VMESS_ADDRESS|VMESS_UUID|VLESS_UUID|WS_PATH|VLESS_TRANSPORT|XHTTP_PATH|SS_PASSWORD|REALITY_SERVER_NAME|REALITY_PUBLIC|REALITY_SHORT_ID|ARGO_MODE|ARGO_DOMAIN|ANYTLS_PORT|ANYTLS_SERVER_NAME|ANYTLS_PASSWORD|ANYTLS_CERT_MODE|ANYTLS_CERT_FILE|ANYTLS_KEY_FILE|ANYTLS_EMAIL|ANYTLS_ADDRESS|CDN_DOMAIN|CDN_ADDRESS|CDN_PORT|CDN_UUID|CDN_PATH)
         printf -v "$key" '%s' "$value" ;;
     esac
   done <"$APP_DIR/state"
@@ -163,12 +178,15 @@ stage_binaries() {
     chmod 0755 "$stage/xray"
     "$stage/xray" version
   fi
-  if protocol_enabled vmess; then
-    download_checked "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${CF_ARCH}" "$stage/cloudflared" "$CF_SHA"
-    chmod 0755 "$stage/cloudflared"
-    "$stage/cloudflared" --version
-  fi
+  if cloudflared_needed; then stage_cloudflared_binary "$stage"; fi
   if protocol_enabled anytls; then stage_anytls_binary "$stage"; fi
+}
+
+stage_cloudflared_binary() {
+  mkdir -p "$1"
+  download_checked "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${CF_ARCH}" "$1/cloudflared" "$CF_SHA"
+  chmod 0755 "$1/cloudflared"
+  "$1/cloudflared" --version
 }
 
 replace_binary() {
@@ -185,7 +203,7 @@ install_binaries() (
   trap 'rm -rf -- "$stage"' EXIT
   stage_binaries "$stage"
   if xray_enabled; then replace_binary "$stage/xray" "$BIN_DIR/xray"; fi
-  if protocol_enabled vmess; then replace_binary "$stage/cloudflared" "$BIN_DIR/cloudflared"; fi
+  if cloudflared_needed; then replace_binary "$stage/cloudflared" "$BIN_DIR/cloudflared"; fi
   if protocol_enabled anytls; then
     install -d -m 0755 "$APP_DIR/bin"
     replace_binary "$stage/sing-box" "$APP_DIR/bin/sing-box"
@@ -212,11 +230,13 @@ create_users() {
     install -d -m 0750 -o root -g xray "$APP_DIR" /var/lib/xray
   fi
   if protocol_enabled anytls; then create_anytls_user; fi
-  if protocol_enabled vmess; then
-    getent group cloudflared >/dev/null || groupadd --system cloudflared
-    id cloudflared >/dev/null 2>&1 || useradd --system --gid cloudflared --home-dir /var/lib/cloudflared --shell /usr/sbin/nologin cloudflared
-    install -d -m 0750 -o cloudflared -g cloudflared /var/lib/cloudflared
-  fi
+  if cloudflared_needed; then create_cloudflared_user; fi
+}
+
+create_cloudflared_user() {
+  getent group cloudflared >/dev/null || groupadd --system cloudflared
+  id cloudflared >/dev/null 2>&1 || useradd --system --gid cloudflared --home-dir /var/lib/cloudflared --shell /usr/sbin/nologin cloudflared
+  install -d -m 0750 -o cloudflared -g cloudflared /var/lib/cloudflared
 }
 
 stage_anytls_binary() {
@@ -742,7 +762,7 @@ do_remove_anytls() (
   remove_changed=1
   systemctl disable --now anytls-lite.service || true
   if systemctl is-active --quiet anytls-lite.service; then die 'AnyTLS 未能停止，未删除任何文件。'; fi
-  set_protocols "${PROTOCOLS%,anytls}"
+  set_protocols "$(protocols_without anytls)"
   export PROTOCOLS
   python3 - "$APP_DIR/state" <<'PY'
 import os, pathlib, sys
@@ -766,6 +786,419 @@ PY
   prune_backups backup-remove-anytls "$remove_backup"
   log "已移除 AnyTLS；其他节点、凭据和服务保持原样。原 state 备份：$remove_backup"
   log '可用菜单 8 重新追加（例如改用自签、新 IP 或新端口）；传入 ANYTLS_PASSWORD 可沿用旧密码。'
+  cat "$APP_DIR/client-info.txt"
+)
+
+# ---- VLESS + XHTTP behind a Cloudflare named tunnel ------------------------------
+# The inbound listens on loopback only and Cloudflare reaches it through cloudflared,
+# so the node keeps working when the server IP itself is blocked. Named tunnels are
+# required: quick tunnels (trycloudflare) hold back streamed response bodies, which
+# breaks XHTTP downlinks in every mode.
+readonly CDN_DEFAULT_PORT=30004
+
+# Tunnel tokens are base64 JSON {"a": account, "t": tunnel id, "s": secret}; print the id.
+cdn_token_tunnel_id() {
+  python3 - "$1" <<'PY'
+import base64, binascii, json, re, sys, uuid
+t = sys.argv[1].rstrip('=')
+if not re.fullmatch(r'[A-Za-z0-9+/_-]{40,4096}', t):
+    sys.exit(1)
+try:
+    d = json.loads(base64.b64decode(t.translate(str.maketrans('-_', '+/')) + '=' * (-len(t) % 4), validate=True))
+    tunnel = uuid.UUID(str(d['t']))
+    if not d.get('a') or not d.get('s'):
+        sys.exit(1)
+except (binascii.Error, ValueError, KeyError, TypeError, AttributeError):
+    sys.exit(1)
+print(tunnel)
+PY
+}
+# Accept the bare token or the whole "cloudflared service install eyJ..." line.
+cdn_extract_token() {
+  local value=$1 re='(eyJ[A-Za-z0-9+/_=-]{20,})'
+  if [[ $value =~ $re ]]; then value=${BASH_REMATCH[1]}; fi
+  printf '%s' "${value//[[:space:]]/}"
+}
+valid_cdn_address() {
+  validate_domain "$1" || python3 -c 'import ipaddress, sys; ipaddress.ip_address(sys.argv[1])' "$1" 2>/dev/null
+}
+cdn_route_hint() {
+  log "Cloudflare 后台：Networking → Tunnels → 你的隧道 → Routes → Add route → Published application"
+  log "  主机名 $CDN_DOMAIN  →  Service URL http://127.0.0.1:$CDN_PORT"
+}
+
+configure_xhttp_cdn() {
+  local value tunnel
+  printf '\nVLESS + XHTTP + Cloudflare 隧道：需要托管在 Cloudflare 的自有域名，本机无需开放端口，IP 被封也能用。\n'
+  printf '先在 Cloudflare 后台 Networking → Tunnels 创建隧道，复制安装命令中 eyJ 开头的 token。\n'
+  while true; do
+    read -r -p "隧道主机名（例如 xhttp.example.com）[${CDN_DOMAIN:-}]: " value || return 1
+    value=$(reality_target_normalize "${value:-${CDN_DOMAIN:-}}")
+    if validate_domain "$value"; then CDN_DOMAIN=$value; break; fi
+    log '主机名格式无效，请重新输入。'
+  done
+  while true; do
+    read -r -s -p '隧道 token（可粘贴整条安装命令；输入时不显示）: ' value || { printf '\n'; return 1; }
+    printf '\n'
+    value=$(cdn_extract_token "$value")
+    if tunnel=$(cdn_token_tunnel_id "$value"); then CDN_TOKEN=$value; log "token 有效，隧道 ID：$tunnel"; break; fi
+    log 'token 无效：应为 Cloudflare 隧道安装命令中 eyJ 开头的那一长串。'
+  done
+  while true; do
+    read -r -p "本机 XHTTP 端口（只监听 127.0.0.1）[${CDN_PORT:-$CDN_DEFAULT_PORT}]: " value || return 1
+    value=${value:-${CDN_PORT:-$CDN_DEFAULT_PORT}}
+    if ! valid_port "$value"; then log '端口应为 1024–65535。'
+    elif ! port_free "$value"; then log "端口 $value 已占用，请换一个。"
+    else CDN_PORT=$value; break; fi
+  done
+  while true; do
+    read -r -p "客户端连接地址（Cloudflare 优选域名或 IP，回车使用 $CDN_DOMAIN）: " value || return 1
+    value=${value:-$CDN_DOMAIN}
+    if valid_cdn_address "$value"; then CDN_ADDRESS=$value; break; fi
+    log '应为域名或 IP，不含端口或路径。'
+  done
+  cdn_route_hint
+}
+
+validate_cdn_options() {
+  CDN_DOMAIN=$(reality_target_normalize "${CDN_DOMAIN:-}")
+  validate_domain "$CDN_DOMAIN" || die 'XHTTP CDN 需要设置有效的 CDN_DOMAIN（隧道里配置的主机名）。'
+  CDN_TOKEN=$(cdn_extract_token "${CDN_TOKEN:-}")
+  cdn_token_tunnel_id "$CDN_TOKEN" >/dev/null || die 'CDN_TOKEN 无效：应为 Cloudflare 隧道安装命令中 eyJ 开头的 token。'
+  CDN_PORT=${CDN_PORT:-$CDN_DEFAULT_PORT}
+  valid_port "$CDN_PORT" || die 'CDN_PORT 只能为 1024–65535。'
+  CDN_ADDRESS=${CDN_ADDRESS:-$CDN_DOMAIN}
+  valid_cdn_address "$CDN_ADDRESS" || die 'CDN_ADDRESS 应为域名或 IP（优选地址），不含端口或路径。'
+  [[ -z ${CDN_PATH:-} ]] || valid_xhttp_path "$CDN_PATH" || die 'CDN_PATH 格式无效。'
+}
+
+# Set state keys from KEY=VALUE lines on stdin. Values never travel through argv or the
+# environment, so nothing rewrites path-like values on the way (e.g. Git Bash in tests).
+state_update() {
+  local code='
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = dict(line.split("=", 1) for line in p.read_text(encoding="utf-8").splitlines())
+for line in sys.stdin.read().splitlines():
+    key, _, value = line.partition("=")
+    s[key] = value
+p.write_bytes("".join(k + "=" + v + "\n" for k, v in s.items()).encode("utf-8"))
+'
+  python3 -c "$code" "$APP_DIR/state"
+}
+
+write_cdn_env() {
+  (umask 077; printf 'TUNNEL_TOKEN=%s\n' "$CDN_TOKEN" >"$APP_DIR/cloudflared-cdn.env")
+  chmod 0600 "$APP_DIR/cloudflared-cdn.env"
+}
+
+write_cdn_unit() {
+  cat >"$UNIT_DIR/cloudflared-cdn-lite.service" <<EOF
+[Unit]
+Description=Cloudflare named tunnel for Speed Slayer Lite XHTTP
+After=network-online.target xray-lite.service
+Wants=network-online.target
+
+[Service]
+User=cloudflared
+Group=cloudflared
+EnvironmentFile=$APP_DIR/cloudflared-cdn.env
+ExecStart=$BIN_DIR/cloudflared --no-autoupdate tunnel run
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# add: (re)place the loopback XHTTP inbound described by state; remove: drop it.
+# The SSE response header stays on: named tunnels stream text/event-stream bodies.
+patch_cdn_inbound() {
+  python3 - "$1" "$2" "$3" "$APP_DIR/state" <<'PY'
+import json, pathlib, sys
+mode, src, dst, state = sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4])
+config = json.loads(src.read_text(encoding='utf-8'))
+s = dict(line.split('=', 1) for line in state.read_text(encoding='utf-8').splitlines())
+inbounds = [n for n in config.get('inbounds', []) if n.get('tag') != 'vless-xhttp-cdn']
+if mode == 'add':
+    inbounds.append({'tag': 'vless-xhttp-cdn', 'listen': '127.0.0.1', 'port': int(s['CDN_PORT']), 'protocol': 'vless',
+                     'settings': {'clients': [{'id': s['CDN_UUID']}], 'decryption': 'none'},
+                     'streamSettings': {'network': 'xhttp', 'xhttpSettings': {'path': s['CDN_PATH'], 'mode': 'auto'}},
+                     'sniffing': {'enabled': True, 'destOverride': ['http', 'tls', 'quic'], 'routeOnly': True}})
+config['inbounds'] = inbounds
+with dst.open('w', encoding='utf-8', newline='\n') as output:
+    output.write(json.dumps(config, ensure_ascii=False, indent=2) + '\n')
+PY
+}
+
+# Print the service the remotely managed tunnel routes host $2 to, from connector log $1.
+# Exit 2: no configuration received yet; exit 3: no route for the host.
+cdn_ingress_service() {
+  python3 - "$1" "$2" <<'PY'
+import json, re, sys
+text = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+host = sys.argv[2].lower()
+configs = re.findall(r'Updated to new configuration config="(.*?)" version=', text)
+if not configs:
+    sys.exit(2)
+try:
+    config = json.loads(configs[-1].replace('\\"', '"'))
+except ValueError:
+    sys.exit(2)
+for rule in config.get('ingress', []):
+    if str(rule.get('hostname', '')).lower() == host:
+        print(rule.get('service', ''))
+        sys.exit(0)
+sys.exit(3)
+PY
+}
+cdn_connector_log() {
+  local id
+  id=$(systemctl show cloudflared-cdn-lite.service --property=InvocationID --value 2>/dev/null || true)
+  journalctl -u cloudflared-cdn-lite.service ${id:+"_SYSTEMD_INVOCATION_ID=$id"} -o cat --no-pager 2>/dev/null || true
+}
+# Full proxy round trip through Cloudflare with a throwaway Xray client.
+cdn_probe() (
+  local dir port i code pid=''
+  dir=$(mktemp -d)
+  trap 'if [[ -n $pid ]]; then kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fi; rm -rf -- "$dir"' EXIT
+  port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+  python3 - "$dir/client.json" "$port" "$CDN_DOMAIN" "$CDN_UUID" "$CDN_PATH" <<'PY'
+import json, sys
+out, port, host, uuid, path = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+json.dump({'log': {'loglevel': 'warning'},
+           'inbounds': [{'listen': '127.0.0.1', 'port': port, 'protocol': 'socks', 'settings': {'udp': False}}],
+           'outbounds': [{'protocol': 'vless',
+                          'settings': {'vnext': [{'address': host, 'port': 443, 'users': [{'id': uuid, 'encryption': 'none'}]}]},
+                          'streamSettings': {'network': 'xhttp', 'security': 'tls',
+                                             'tlsSettings': {'serverName': host, 'fingerprint': 'chrome'},
+                                             'xhttpSettings': {'host': host, 'path': path, 'mode': 'packet-up'}}}]},
+          open(out, 'w', encoding='utf-8'))
+PY
+  "$BIN_DIR/xray" run -config "$dir/client.json" >"$dir/xray.log" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 15; i++)); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -x "socks5h://127.0.0.1:$port" https://www.gstatic.com/generate_204 || true)
+    [[ $code == 204 ]] && return 0
+    sleep 2
+  done
+  return 1
+)
+
+verify_xhttp_cdn() {
+  local file service='' status=2 i tries=${CDN_VERIFY_TRIES:-30}
+  log '正在检查 Cloudflare 隧道路由和 XHTTP 连通性（通常数秒，最多约 3 分钟）...'
+  file=$(mktemp)
+  for ((i = 0; i < tries; i++)); do
+    cdn_connector_log >"$file"
+    if service=$(cdn_ingress_service "$file" "$CDN_DOMAIN"); then status=0; else status=$?; fi
+    (( status == 2 )) || break
+    sleep 2
+  done
+  rm -f -- "$file"
+  case $status in
+    0) [[ $service =~ ^http://(127\.0\.0\.1|localhost):${CDN_PORT}/?$ ]] ||
+         die "隧道把 $CDN_DOMAIN 转发到 ${service:-（空）}，应为 http://127.0.0.1:$CDN_PORT；请在 Cloudflare 后台修改该路由的 Service URL 后重试。" ;;
+    3) cdn_route_hint; die "隧道路由里没有 $CDN_DOMAIN，请按上面的提示添加后重试。" ;;
+    *) die '没有读到隧道的远程路由配置；请确认 token 正确、隧道在 Cloudflare 后台管理，并查看 journalctl -u cloudflared-cdn-lite。' ;;
+  esac
+  cdn_probe || die "经 Cloudflare 访问 $CDN_DOMAIN 的 XHTTP 失败；请确认该主机名的 DNS 是指向此隧道的橙色云 CNAME，并查看 journalctl -u cloudflared-cdn-lite 与 xray-lite。"
+  log "Cloudflare 隧道与 XHTTP 验证通过：$CDN_DOMAIN → 127.0.0.1:$CDN_PORT"
+}
+
+cdn_client_info() {
+  local address=$CDN_ADDRESS link_address=$CDN_ADDRESS
+  if [[ $address == *:* ]]; then link_address="[$address]"; fi
+  printf 'VLESS + XHTTP + Cloudflare 隧道（%s，mode=packet-up）\n' "$CDN_DOMAIN"
+  printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&fp=chrome&type=xhttp&host=%s&path=%s&mode=packet-up#vless-xhttp-cdn\n' \
+    "$CDN_UUID" "$link_address" "$CDN_DOMAIN" "$CDN_DOMAIN" "${CDN_PATH//\//%2F}"
+  printf '\nmihomo（Clash Meta）配置片段：\n'
+  printf -- '- name: vless-xhttp-cdn\n  type: vless\n  server: "%s"\n  port: 443\n  uuid: "%s"\n  network: xhttp\n' "$address" "$CDN_UUID"
+  printf '  tls: true\n  udp: true\n  servername: "%s"\n  client-fingerprint: chrome\n' "$CDN_DOMAIN"
+  printf '  xhttp-opts:\n    path: "%s"\n    host: "%s"\n    mode: packet-up\n' "$CDN_PATH" "$CDN_DOMAIN"
+  printf '\n连接地址可换成 Cloudflare 优选域名或 IP；sni/servername 与 host 必须保持 %s。\n' "$CDN_DOMAIN"
+}
+
+cdn_instructions() {
+  log "XHTTP + CF 隧道：$CDN_DOMAIN → 127.0.0.1:$CDN_PORT；本机无需开放任何入站端口，服务器 IP 被封也能使用。"
+  log '同一个隧道 token 不要同时在两台机器上运行：Cloudflare 会把请求分给两台机器，XHTTP 会话会断开。'
+}
+
+do_add_xhttp_cdn() (
+  need_root
+  # Keep requested options across load_state; never re-generate existing protocols.
+  local domain=${CDN_DOMAIN:-} token=${CDN_TOKEN:-} port=${CDN_PORT:-} address=${CDN_ADDRESS:-} path=${CDN_PATH:-} existing
+  [[ -r $APP_DIR/state ]] || die '尚未安装 Lite；新装时直接勾选 5 即可。'
+  need_cmd flock
+  exec 9>"$APP_DIR/manage.lock"
+  flock -n 9 || die '另一项维护操作仍在运行。'
+  load_state
+  protocol_enabled xhttpcdn && die '已安装 XHTTP + CF 隧道；更换主机名、token 或端口请先用菜单 14 移除。'
+  xray_needed_without_cdn || die '当前只装了 AnyTLS，暂不支持追加；请卸载后在新装时勾选 5（可同时勾选 4）。'
+  [[ ! -e $UNIT_DIR/cloudflared-cdn-lite.service && ! -e $APP_DIR/cloudflared-cdn.env ]] || die '存在未记录的 CF 隧道文件，请先检查，拒绝覆盖。'
+  [[ -s $APP_DIR/xray.json ]] || die 'Xray 配置缺失，请先检查安装。'
+  systemctl is-active --quiet xray-lite.service || die 'Xray 未运行；请先排查现有服务。'
+  CDN_DOMAIN=$domain CDN_TOKEN=$token CDN_PORT=$port CDN_ADDRESS=$address CDN_PATH=$path
+  if [[ ( -z $CDN_DOMAIN || -z $CDN_TOKEN ) && -t 0 ]]; then configure_xhttp_cdn || return 0; fi
+  set_protocols "$PROTOCOLS,xhttpcdn"
+  validate_cdn_options
+  for existing in "$VMESS_PORT" "$SS_PORT" "$REALITY_PORT" "$REALITY_GUARD_PORT" "$ANYTLS_PORT"; do
+    [[ -z $existing ]] || (( 10#$existing != 10#$CDN_PORT )) || die 'CDN_PORT 与已有节点端口重复。'
+  done
+  port_free "$CDN_PORT" || die "端口 $CDN_PORT 已占用。"
+  install_packages
+  need_cmd xray; need_cmd curl; need_cmd python3
+  detect_arch
+  cdn_backup=$(mktemp -d "$APP_DIR/backup-cdn-$(date +%Y%m%d%H%M%S).XXXXXX")
+  chmod 0700 "$cdn_backup"
+  cp -p "$APP_DIR/state" "$APP_DIR/xray.json" "$APP_DIR/install.sh" "$cdn_backup/"
+  if [[ -f $APP_DIR/client-info.txt ]]; then cp -p "$APP_DIR/client-info.txt" "$cdn_backup/"; fi
+  cdn_changed=0 cdn_new_binary=0
+  rollback_add_cdn() {
+    local status=$? failed=0
+    trap - EXIT INT TERM
+    rm -rf -- "$cdn_backup/candidate" "$cdn_backup/next.json"
+    if (( status != 0 && cdn_changed == 1 )); then
+      log "追加 XHTTP + CF 隧道失败，恢复原节点：$cdn_backup"
+      systemctl disable --now cloudflared-cdn-lite.service >/dev/null 2>&1 || true
+      rm -f -- "$UNIT_DIR/cloudflared-cdn-lite.service" "$APP_DIR/cloudflared-cdn.env"
+      if (( cdn_new_binary == 1 )); then rm -f -- "$BIN_DIR/cloudflared"; fi
+      cp -p "$cdn_backup/state" "$cdn_backup/xray.json" "$cdn_backup/install.sh" "$APP_DIR/" || failed=1
+      if [[ -f $cdn_backup/client-info.txt ]]; then
+        cp -p "$cdn_backup/client-info.txt" "$APP_DIR/" || failed=1
+      else
+        rm -f -- "$APP_DIR/client-info.txt" || failed=1
+      fi
+      systemctl daemon-reload || failed=1
+      systemctl restart xray-lite.service || failed=1
+      systemctl is-active --quiet xray-lite.service || failed=1
+      (( failed == 0 )) || log "自动恢复未完成，请检查 $cdn_backup 与 journalctl -u xray-lite。"
+      if protocol_enabled vmess; then log "Quick Tunnel 域名可能已变化；运行 $APP show 刷新链接。"; fi
+    elif (( status != 0 )) && [[ $cdn_backup == "$APP_DIR"/backup-cdn-* ]]; then
+      rm -rf -- "$cdn_backup"   # nothing was changed, so this copy has no use
+    fi
+    exit "$status"
+  }
+  trap rollback_add_cdn EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ ! -x $BIN_DIR/cloudflared ]]; then stage_cloudflared_binary "$cdn_backup/candidate"; fi
+  CDN_UUID=$(xray uuid)
+  CDN_PATH=${CDN_PATH:-/$(openssl rand -hex 16)}
+  cdn_changed=1
+  if [[ -x $cdn_backup/candidate/cloudflared ]]; then
+    cdn_new_binary=1
+    replace_binary "$cdn_backup/candidate/cloudflared" "$BIN_DIR/cloudflared"
+  fi
+  create_cloudflared_user
+  printf '%s\n' "PROTOCOLS=$PROTOCOLS" "CDN_DOMAIN=$CDN_DOMAIN" "CDN_ADDRESS=$CDN_ADDRESS" \
+    "CDN_PORT=$CDN_PORT" "CDN_UUID=$CDN_UUID" "CDN_PATH=$CDN_PATH" | state_update
+  write_cdn_env
+  patch_cdn_inbound add "$APP_DIR/xray.json" "$cdn_backup/next.json"
+  xray run -test -config "$cdn_backup/next.json"
+  chown root:xray "$cdn_backup/next.json"
+  chmod 0640 "$cdn_backup/next.json"
+  mv -f "$cdn_backup/next.json" "$APP_DIR/xray.json"
+  write_cdn_unit
+  install_self
+  systemctl daemon-reload
+  systemctl restart xray-lite.service
+  systemctl is-active --quiet xray-lite.service || die '追加后 Xray 未正常启动。'
+  systemctl enable --now cloudflared-cdn-lite.service
+  systemctl is-active --quiet cloudflared-cdn-lite.service || die 'CF 隧道启动失败，请检查 journalctl -u cloudflared-cdn-lite。'
+  verify_xhttp_cdn
+  # PartOf=xray-lite may have restarted the VMess Quick Tunnel with a new hostname.
+  if protocol_enabled vmess && [[ $ARGO_MODE == quick ]] && ! wait_for_quick_domain; then
+    log "尚未读到 Quick Tunnel 域名；稍后运行 $APP show。"
+  fi
+  write_client_info
+  cdn_changed=0
+  trap - EXIT INT TERM
+  rm -rf -- "$cdn_backup/candidate"
+  prune_backups backup-cdn "$cdn_backup"
+  log '已追加 VLESS + XHTTP + Cloudflare 隧道；原有节点的凭据保持不变。'
+  cdn_instructions
+  cat "$APP_DIR/client-info.txt"
+)
+
+do_remove_xhttp_cdn() (
+  need_root
+  [[ -r $APP_DIR/state ]] || die '尚未安装 Lite。'
+  need_cmd flock
+  exec 9>"$APP_DIR/manage.lock"
+  flock -n 9 || die '另一项维护操作仍在运行。'
+  load_state
+  protocol_enabled xhttpcdn || die '未安装 XHTTP + CF 隧道。'
+  local answer
+  cdn_remaining=$(protocols_without xhttpcdn)
+  [[ -n $cdn_remaining ]] || die '只安装了 XHTTP + CF 隧道；如需全部移除请选择卸载。'
+  [[ ,$cdn_remaining, =~ ,(vmess|ss2022|vless), ]] || die '移除后只剩 AnyTLS，暂不支持；如需调整请卸载后重装。'
+  if [[ ${1:-} != --yes ]]; then
+    log '将停止 CF 隧道连接器，删除 XHTTP CDN 入站及其 UUID 和隧道 token；其他节点保持原样。'
+    read -r -p '确认移除 XHTTP + CF 隧道？[y/N]: ' answer || answer=''
+    [[ $answer == y || $answer == Y ]] || { log '已取消移除。'; return 0; }
+  fi
+  cdn_remove_backup=$(mktemp -d "$APP_DIR/backup-remove-cdn-$(date +%Y%m%d%H%M%S).XXXXXX")
+  chmod 0700 "$cdn_remove_backup"
+  cp -p "$APP_DIR/state" "$APP_DIR/xray.json" "$APP_DIR/cloudflared-cdn.env" "$UNIT_DIR/cloudflared-cdn-lite.service" "$cdn_remove_backup/"
+  if [[ -f $APP_DIR/client-info.txt ]]; then cp -p "$APP_DIR/client-info.txt" "$cdn_remove_backup/"; fi
+  cdn_remove_changed=0
+  rollback_remove_cdn() {
+    local status=$? failed=0
+    trap - EXIT INT TERM
+    rm -f -- "$cdn_remove_backup/next.json"
+    if (( status != 0 && cdn_remove_changed == 1 )); then
+      log "移除 XHTTP + CF 隧道失败，恢复原状态：$cdn_remove_backup"
+      cp -p "$cdn_remove_backup/state" "$cdn_remove_backup/xray.json" "$cdn_remove_backup/cloudflared-cdn.env" "$APP_DIR/" || failed=1
+      cp -p "$cdn_remove_backup/cloudflared-cdn-lite.service" "$UNIT_DIR/" || failed=1
+      if [[ -f $cdn_remove_backup/client-info.txt ]]; then
+        cp -p "$cdn_remove_backup/client-info.txt" "$APP_DIR/" || failed=1
+      else
+        rm -f -- "$APP_DIR/client-info.txt" || failed=1
+      fi
+      systemctl daemon-reload || failed=1
+      systemctl restart xray-lite.service || failed=1
+      systemctl enable --now cloudflared-cdn-lite.service || failed=1
+      (( failed == 0 )) || log "自动恢复未完成，请检查 $cdn_remove_backup 与 journalctl -u xray-lite / cloudflared-cdn-lite。"
+    fi
+    exit "$status"
+  }
+  trap rollback_remove_cdn EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  patch_cdn_inbound remove "$APP_DIR/xray.json" "$cdn_remove_backup/next.json"
+  xray run -test -config "$cdn_remove_backup/next.json"
+  chown root:xray "$cdn_remove_backup/next.json"
+  chmod 0640 "$cdn_remove_backup/next.json"
+  cdn_remove_changed=1
+  systemctl disable --now cloudflared-cdn-lite.service || true
+  if systemctl is-active --quiet cloudflared-cdn-lite.service; then die 'CF 隧道连接器未能停止，未删除任何文件。'; fi
+  mv -f "$cdn_remove_backup/next.json" "$APP_DIR/xray.json"
+  printf '%s\n' "PROTOCOLS=$cdn_remaining" CDN_DOMAIN= CDN_ADDRESS= CDN_PORT= CDN_UUID= CDN_PATH= | state_update
+  set_protocols "$cdn_remaining"
+  systemctl restart xray-lite.service
+  systemctl is-active --quiet xray-lite.service || die '移除后 Xray 未正常启动。'
+  if protocol_enabled vmess && [[ $ARGO_MODE == quick ]] && ! wait_for_quick_domain; then
+    log "尚未读到 Quick Tunnel 域名；稍后运行 $APP show。"
+  fi
+  write_client_info
+  cdn_remove_changed=0
+  trap - EXIT INT TERM
+  rm -f -- "$UNIT_DIR/cloudflared-cdn-lite.service" "$APP_DIR/cloudflared-cdn.env"
+  systemctl daemon-reload
+  prune_backups backup-remove-cdn "$cdn_remove_backup"
+  log "已移除 XHTTP + CF 隧道；其他节点、凭据和服务保持原样（cloudflared 程序保留）。原配置备份：$cdn_remove_backup"
+  log '可用菜单 13 重新追加（例如换主机名、token 或端口）。'
   cat "$APP_DIR/client-info.txt"
 )
 
@@ -794,6 +1227,12 @@ write_config() {
     prepare_anytls_identity
     ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(openssl rand -hex 32)}
   fi
+  if protocol_enabled xhttpcdn; then
+    CDN_UUID=$(xray uuid)
+    CDN_PATH=${CDN_PATH:-/$(openssl rand -hex 16)}
+  else
+    CDN_DOMAIN='' CDN_ADDRESS='' CDN_PORT='' CDN_UUID='' CDN_PATH=''
+  fi
   cat >"$APP_DIR/state" <<EOF
 PROTOCOLS=$PROTOCOLS
 VMESS_PORT=${VMESS_PORT:-}
@@ -820,8 +1259,14 @@ ANYTLS_CERT_FILE=${ANYTLS_CERT_FILE:-}
 ANYTLS_KEY_FILE=${ANYTLS_KEY_FILE:-}
 ANYTLS_EMAIL=${ANYTLS_EMAIL:-}
 ANYTLS_ADDRESS=${ANYTLS_ADDRESS:-}
+CDN_DOMAIN=${CDN_DOMAIN:-}
+CDN_ADDRESS=${CDN_ADDRESS:-}
+CDN_PORT=${CDN_PORT:-}
+CDN_UUID=${CDN_UUID:-}
+CDN_PATH=${CDN_PATH:-}
 EOF
   chmod 0600 "$APP_DIR/state"
+  if protocol_enabled xhttpcdn; then write_cdn_env; fi
   if protocol_enabled anytls; then write_anytls_config; fi
   xray_enabled || return 0
   REALITY_PRIVATE="$REALITY_PRIVATE" python3 - "$APP_DIR" <<'PY'
@@ -858,6 +1303,7 @@ config = {'log': {'loglevel': 'warning'}, 'inbounds': nodes,
           'routing': {'rules': rules}}
 (root/'xray.json').write_bytes((json.dumps(config, ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
 PY
+  if protocol_enabled xhttpcdn; then patch_cdn_inbound add "$APP_DIR/xray.json" "$APP_DIR/xray.json"; fi
   chown root:xray "$APP_DIR/xray.json"
   chmod 0640 "$APP_DIR/xray.json"
   if protocol_enabled vmess; then
@@ -901,6 +1347,7 @@ EOF
 write_units() {
   if xray_enabled; then render_xray_unit >"$UNIT_DIR/xray-lite.service"; fi
   if protocol_enabled anytls; then write_anytls_unit; fi
+  if protocol_enabled xhttpcdn; then write_cdn_unit; fi
   protocol_enabled vmess || return 0
   local cf_exec cf_env=''
   if [[ $ARGO_MODE == token ]]; then
@@ -1041,6 +1488,10 @@ write_client_info() (
       content+="AnyTLS + TLS（客户端使用 sing-box / mihomo；开启证书校验）"$'\n'"$uri"$'\n\n'
     fi
   fi
+  if protocol_enabled xhttpcdn; then
+    validate_domain "$CDN_DOMAIN" && valid_xhttp_path "$CDN_PATH" || die 'state 中的 CDN_DOMAIN / CDN_PATH 无效'
+    content+="$(cdn_client_info)"$'\n\n'
+  fi
   tmp=$(mktemp "$APP_DIR/client-info.XXXXXX")
   trap 'rm -f -- "$tmp"' EXIT
   printf '%s提示：此文件包含节点访问凭据，仅保存在服务器本机。\n' "$content" >"$tmp"
@@ -1081,25 +1532,26 @@ mihomo_vless_yaml() {
 configure_install() {
   local input item sni_mode value
   local -a choices=()
-  ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0
+  ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0 ENABLE_XHTTPCDN=0
   while true; do
     printf '\n请选择需要创建的协议（输入编号切换勾选，可输入 1 3）：\n'
     printf '  [%s] 1. VMess + WebSocket + Argo\n' "$( [[ $ENABLE_VMESS == 1 ]] && printf x || printf ' ' )"
     printf '  [%s] 2. Shadowsocks 2022\n' "$( [[ $ENABLE_SS2022 == 1 ]] && printf x || printf ' ' )"
     printf '  [%s] 3. VLESS + XHTTP + REALITY\n' "$( [[ $ENABLE_VLESS == 1 ]] && printf x || printf ' ' )"
     printf '  [%s] 4. AnyTLS + TLS（域名证书 / 自签 IP 直连）\n' "$( [[ $ENABLE_ANYTLS == 1 ]] && printf x || printf ' ' )"
-    printf '  a. 全选  n. 清空  0. 取消  回车：确认选择\n'
+    printf '  [%s] 5. VLESS + XHTTP + Cloudflare 隧道（自有域名，IP 被封也能用）\n' "$( [[ $ENABLE_XHTTPCDN == 1 ]] && printf x || printf ' ' )"
+    printf '  a. 全选 1–4（5 需要自有域名和隧道 token，请单独勾选）  n. 清空  0. 取消  回车：确认选择\n'
     read -r -p '请选择: ' input || return 1
     case $input in
       0) return 1 ;;
       a|A) ENABLE_VMESS=1 ENABLE_SS2022=1 ENABLE_VLESS=1 ENABLE_ANYTLS=1; continue ;;
-      n|N) ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0; continue ;;
+      n|N) ENABLE_VMESS=0 ENABLE_SS2022=0 ENABLE_VLESS=0 ENABLE_ANYTLS=0 ENABLE_XHTTPCDN=0; continue ;;
       '')
-        [[ $ENABLE_VMESS$ENABLE_SS2022$ENABLE_VLESS$ENABLE_ANYTLS != 0000 ]] && break
+        [[ $ENABLE_VMESS$ENABLE_SS2022$ENABLE_VLESS$ENABLE_ANYTLS$ENABLE_XHTTPCDN != 00000 ]] && break
         log '请至少勾选一个协议。'; continue ;;
     esac
     input=${input//,/ }
-    [[ $input =~ ^[1234[:space:]]+$ ]] || { log '只接受编号 1、2、3、4。'; continue; }
+    [[ $input =~ ^[12345[:space:]]+$ ]] || { log '只接受编号 1、2、3、4、5。'; continue; }
     read -r -a choices <<<"$input"
     for item in "${choices[@]}"; do
       case $item in
@@ -1107,6 +1559,7 @@ configure_install() {
         2) ENABLE_SS2022=$((1-ENABLE_SS2022)) ;;
         3) ENABLE_VLESS=$((1-ENABLE_VLESS)) ;;
         4) ENABLE_ANYTLS=$((1-ENABLE_ANYTLS)) ;;
+        5) ENABLE_XHTTPCDN=$((1-ENABLE_XHTTPCDN)) ;;
         *) log '请用空格分隔编号，例如 1 3。' ;;
       esac
     done
@@ -1116,6 +1569,7 @@ configure_install() {
   [[ $ENABLE_SS2022 == 0 ]] || value="${value:+$value,}ss2022"
   [[ $ENABLE_VLESS == 0 ]] || value="${value:+$value,}vless"
   [[ $ENABLE_ANYTLS == 0 ]] || value="${value:+$value,}anytls"
+  [[ $ENABLE_XHTTPCDN == 0 ]] || value="${value:+$value,}xhttpcdn"
   set_protocols "$value" || return 1
   if protocol_enabled vless; then
     while true; do
@@ -1138,11 +1592,12 @@ configure_install() {
     done
   fi
   if protocol_enabled anytls; then configure_anytls || return 1; fi
+  if protocol_enabled xhttpcdn; then configure_xhttp_cdn || return 1; fi
   log "将创建：$PROTOCOLS"
 }
 
 validate_install_options() {
-  set_protocols "${PROTOCOLS-vmess,ss2022,vless}" || die 'PROTOCOLS 只接受 vmess、ss2022、vless、anytls，用逗号分隔。'
+  set_protocols "${PROTOCOLS-vmess,ss2022,vless}" || die 'PROTOCOLS 只接受 vmess、ss2022、vless、anytls、xhttpcdn，用逗号分隔。'
   local port
   local -A used=()
   ACTIVE_PORTS=()
@@ -1184,6 +1639,12 @@ validate_install_options() {
     ANYTLS_PORT='' ANYTLS_SERVER_NAME='' ANYTLS_PASSWORD='' ANYTLS_CERT_MODE=''
     ANYTLS_CERT_FILE='' ANYTLS_KEY_FILE='' ANYTLS_EMAIL='' ANYTLS_ADDRESS=''
   fi
+  if protocol_enabled xhttpcdn; then
+    validate_cdn_options
+    ACTIVE_PORTS+=("$CDN_PORT")
+  else
+    CDN_DOMAIN='' CDN_TOKEN='' CDN_ADDRESS='' CDN_PORT='' CDN_PATH=''
+  fi
   for port in "${ACTIVE_PORTS[@]}"; do
     port=$((10#$port))
     [[ ! ${used[$port]+yes} ]] || die "已选协议的端口不能重复：$port"
@@ -1193,13 +1654,13 @@ validate_install_options() {
 
 remove_services_and_config() {
   local unit
-  for unit in anytls-lite cloudflared-lite xray-lite; do
+  for unit in anytls-lite cloudflared-cdn-lite cloudflared-lite xray-lite; do
     if [[ -f $UNIT_DIR/$unit.service ]]; then
       systemctl disable --now "$unit.service" || true
       if systemctl is-active --quiet "$unit.service"; then die "$unit 仍在运行，未删除配置，请检查服务。"; fi
     fi
   done
-  rm -f -- "$UNIT_DIR/anytls-lite.service" "$UNIT_DIR/cloudflared-lite.service" "$UNIT_DIR/xray-lite.service" "$SHORTCUT"
+  rm -f -- "$UNIT_DIR/anytls-lite.service" "$UNIT_DIR/cloudflared-cdn-lite.service" "$UNIT_DIR/cloudflared-lite.service" "$UNIT_DIR/xray-lite.service" "$SHORTCUT"
   rm -rf -- "$UNIT_DIR/cloudflared-lite.service.d" "$APP_DIR"
   systemctl daemon-reload
 }
@@ -1244,6 +1705,11 @@ do_install() {
     systemctl is-active --quiet cloudflared-lite.service || die 'cloudflared 启动失败，请运行 journalctl -u cloudflared-lite'
     if [[ $ARGO_MODE == quick ]] && ! wait_for_quick_domain; then log "尚未读到 Quick Tunnel 域名，稍后运行 $APP show。"; fi
   fi
+  if protocol_enabled xhttpcdn; then
+    systemctl enable --now cloudflared-cdn-lite.service
+    systemctl is-active --quiet cloudflared-cdn-lite.service || die 'CF 隧道启动失败，请运行 journalctl -u cloudflared-cdn-lite'
+    verify_xhttp_cdn
+  fi
   write_client_info
   trap - EXIT
   cat "$APP_DIR/client-info.txt"
@@ -1251,6 +1717,7 @@ do_install() {
   if protocol_enabled vless; then log "防火墙需开放 $REALITY_PORT/tcp；无需开放内部守门端口。"; fi
   if protocol_enabled vmess; then log "VMess 使用 Argo，不要开放内部端口 $VMESS_PORT。请确保服务器和客户端自动对时正常。"; fi
   if protocol_enabled anytls; then anytls_instructions; fi
+  if protocol_enabled xhttpcdn; then cdn_instructions; fi
   log "完成。运行 $APP 可再次打开管理菜单。"
 }
 
@@ -1263,6 +1730,7 @@ do_status() (
   if xray_enabled; then services+=(xray-lite.service); fi
   if protocol_enabled vmess; then services+=(cloudflared-lite.service); fi
   if protocol_enabled anytls; then services+=(anytls-lite.service); fi
+  if protocol_enabled xhttpcdn; then services+=(cloudflared-cdn-lite.service); fi
   systemctl --no-pager --full status "${services[@]}" || true
   ss -lntup | grep -E 'xray|cloudflared|sing-box' || true
 )
@@ -1627,6 +2095,7 @@ restart_selected_services() {
   if xray_enabled; then services+=(xray-lite.service); fi
   if protocol_enabled vmess; then services+=(cloudflared-lite.service); fi
   if protocol_enabled anytls; then services+=(anytls-lite.service); fi
+  if protocol_enabled xhttpcdn; then services+=(cloudflared-cdn-lite.service); fi
   systemctl restart "${services[@]}" || return 1
   local unit
   for unit in "${services[@]}"; do systemctl is-active --quiet "$unit" || return 1; done
@@ -1648,9 +2117,12 @@ apply_update() (
     systemctl is-active --quiet anytls-lite.service || die 'AnyTLS 未运行，请先检查服务。'
     need_cmd tar; need_cmd python3
   fi
+  if cloudflared_needed; then [[ -x $BIN_DIR/cloudflared ]] || die 'cloudflared 不存在，请先检查安装。'; fi
   if protocol_enabled vmess; then
-    [[ -x $BIN_DIR/cloudflared ]] || die 'cloudflared 不存在，请先检查安装。'
     systemctl is-active --quiet cloudflared-lite.service || die 'Argo 未运行，请先修复隧道。'
+  fi
+  if protocol_enabled xhttpcdn; then
+    systemctl is-active --quiet cloudflared-cdn-lite.service || die 'XHTTP 的 CF 隧道连接器未运行，请先检查 journalctl -u cloudflared-cdn-lite。'
   fi
   detect_arch
   # EXIT traps must retain these values after function stack unwinding.
@@ -1661,7 +2133,7 @@ apply_update() (
     cp -p "$BIN_DIR/xray" "$update_backup/xray"
     cp -p "$APP_DIR/xray.json" "$update_backup/"
   fi
-  if protocol_enabled vmess; then cp -p "$BIN_DIR/cloudflared" "$update_backup/cloudflared"; fi
+  if cloudflared_needed; then cp -p "$BIN_DIR/cloudflared" "$update_backup/cloudflared"; fi
   if protocol_enabled anytls; then
     cp -p "$APP_DIR/bin/sing-box" "$update_backup/sing-box"
     cp -p "$APP_DIR/anytls.json" "$UNIT_DIR/anytls-lite.service" "$update_backup/"
@@ -1678,7 +2150,7 @@ apply_update() (
     if (( status != 0 && update_changed == 1 )); then
       log "更新失败，正在恢复旧版内核和脚本：$update_backup"
       if xray_enabled; then replace_binary "$update_backup/xray" "$BIN_DIR/xray" || failed=1; fi
-      if protocol_enabled vmess; then replace_binary "$update_backup/cloudflared" "$BIN_DIR/cloudflared" || failed=1; fi
+      if cloudflared_needed; then replace_binary "$update_backup/cloudflared" "$BIN_DIR/cloudflared" || failed=1; fi
       if protocol_enabled anytls; then replace_binary "$update_backup/sing-box" "$APP_DIR/bin/sing-box" || failed=1; fi
       if [[ -f $update_backup/anytls-lite.service ]] && ! cmp -s "$update_backup/anytls-lite.service" "$UNIT_DIR/anytls-lite.service"; then
         cp -p "$update_backup/anytls-lite.service" "$UNIT_DIR/anytls-lite.service" || failed=1
@@ -1709,7 +2181,7 @@ apply_update() (
   install_self "$update_backup/next.install.sh"
   update_changed=1
   if xray_enabled; then replace_binary "$update_backup/candidate/xray" "$BIN_DIR/xray"; fi
-  if protocol_enabled vmess; then replace_binary "$update_backup/candidate/cloudflared" "$BIN_DIR/cloudflared"; fi
+  if cloudflared_needed; then replace_binary "$update_backup/candidate/cloudflared" "$BIN_DIR/cloudflared"; fi
   if protocol_enabled anytls; then replace_binary "$update_backup/candidate/sing-box" "$APP_DIR/bin/sing-box"; fi
   # Units written by older releases lack the MPTCP opt-out; regenerate from state.
   if protocol_enabled anytls && ! grep -qxF "$ANYTLS_NO_MPTCP" "$UNIT_DIR/anytls-lite.service"; then
@@ -1720,6 +2192,7 @@ apply_update() (
   mv -f "$update_backup/next.install.sh" "$APP_DIR/install.sh"
   restart_selected_services
   if protocol_enabled anytls; then verify_anytls_tls; fi
+  if protocol_enabled xhttpcdn; then verify_xhttp_cdn; fi
   if protocol_enabled vmess && [[ $ARGO_MODE == quick ]]; then
     wait_for_quick_domain || die '更新后未获取到 Quick Tunnel 域名，正在恢复旧版。'
   fi
@@ -1796,6 +2269,8 @@ menu() {
 10. 移除 AnyTLS（保留其他节点）
 11. 修改 VLESS REALITY 的 SNI / 目标站
 12. 检查 REALITY 目标站（TLS 1.3 / h2 / 证书 / 距离）
+13. 追加 VLESS + XHTTP + Cloudflare 隧道（保留其他节点）
+14. 移除 VLESS + XHTTP + Cloudflare 隧道（保留其他节点）
 0. 退出
 EOF
     read -r -p '请选择: ' choice || return 0
@@ -1810,7 +2285,7 @@ EOF
         read -r -p '要检查的域名（空格分隔；已装 VLESS 时回车检查当前 SNI）: ' value || continue
         read -r -a targets <<<"$value"
         menu_run do_check_reality_target "${targets[@]}" ;;
-      2|3|4|5|6|7|8|9|10|11)
+      2|3|4|5|6|7|8|9|10|11|13|14)
         if [[ ! -r $APP_DIR/state ]]; then log '请先选择 1 创建节点。'; continue; fi
         case $choice in
           2) menu_run do_show ;;
@@ -1825,6 +2300,8 @@ EOF
           11)
             read -r -p '新的 REALITY SNI（目标站域名）: ' value || continue
             menu_run do_set_reality_sni ${value:+"$value"} ;;
+          13) menu_run do_add_xhttp_cdn ;;
+          14) menu_run do_remove_xhttp_cdn ;;
         esac ;;
       *) log '请输入菜单中的编号。' ;;
     esac
@@ -1849,8 +2326,10 @@ main() {
     export-anytls-client) do_export_anytls_client ;;
     set-reality-sni) shift; do_set_reality_sni "$@" ;;
     check-reality-target) shift; do_check_reality_target "$@" ;;
+    add-xhttp-cdn) do_add_xhttp_cdn ;;
+    remove-xhttp-cdn) do_remove_xhttp_cdn "${2:-}" ;;
     uninstall) do_uninstall "${2:-}" ;;
-    *) die "用法: $0 {menu|install|show|status|update|repair-argo|migrate-xhttp|add-anytls|refresh-anytls-cert|remove-anytls [--yes]|export-anytls-client|set-reality-sni 域名 [--force]|check-reality-target [域名 ...]|uninstall [--yes]}" ;;
+    *) die "用法: $0 {menu|install|show|status|update|repair-argo|migrate-xhttp|add-anytls|refresh-anytls-cert|remove-anytls [--yes]|export-anytls-client|set-reality-sni 域名 [--force]|check-reality-target [域名 ...]|add-xhttp-cdn|remove-xhttp-cdn [--yes]|uninstall [--yes]}" ;;
   esac
 }
 

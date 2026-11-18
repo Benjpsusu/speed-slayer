@@ -315,6 +315,16 @@ Quick Tunnel 适合测试，域名可能随重启变化。需要稳定域名时�
 
 ## 修改记录（溯源）
 
+### 2026-11-18 — review 版：VLESS + XHTTP + Cloudflare 命名隧道
+
+- 新协议只在 `install-review.sh` 中提供（新装勾选 5，菜单 13 / 14，`add-xhttp-cdn` / `remove-xhttp-cdn`）；本目录的 `install.sh` 不变，所以本文"用法"章节不变，用法见 `README-review.md`。需要托管在 Cloudflare 的自有域名和命名隧道 token；快速隧道实测无法承载 XHTTP。
+- 验证：87 项测试通过，新增用例做了红绿验证；在测试机上用真实隧道验证了追加、填错端口回滚、客户端连接、移除和全新安装。未验证：从国内实际连接、IP 真正被封的机器、arm64 / Ubuntu。
+
+### 2026-11-18 — review 文档：Windows PowerShell 扫描写法
+
+- `README-review.md` 原先只给了 bash 管道，在 Windows PowerShell 中运行会报错。现补充 PowerShell 写法：用 `Import-Csv` 提取域名，生成一行 VPS 命令并复制到剪贴板；同时说明不能用 `>` 或 `Set-Content` 生成给 bash 用的文件，并提醒扫描前关闭本机代理的 TUN。本文"用法"章节和脚本不变。
+- 验证：样本 CSV 在 PowerShell 5.1 和 7.6 中提取结果正确。未验证：没有实际运行扫描器。
+
 ### 2026-11-18 — review 版：Xray 26.11.9、AnyTLS 关闭 MPTCP、REALITY SNI 管理与 mihomo 片段
 
 - 只修改 review 文件（`install-review.sh`、`test-review-cases.sh`、`README-review.md`）；本目录的 `install.sh` 和原有测试未改动。所以本文"用法"章节不变，新命令 `set-reality-sni`、`check-reality-target`（菜单 11/12）的用法写在 `README-review.md`。

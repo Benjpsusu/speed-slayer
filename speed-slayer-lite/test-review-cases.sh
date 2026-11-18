@@ -496,4 +496,184 @@ sed -i 's/^VLESS_TRANSPORT=.*/VLESS_TRANSPORT=tcp/' "$APP_DIR/state"
 write_client_info
 mihomo_check tcp 203.0.113.15
 pass 'show: mihomo block (quoted values, IPv6 without brackets, XHTTP/TCP) always sets support-x25519mlkem768'
+
+# Shared stand-ins for the Cloudflare tunnel cases; keep the real verifier for case 14.
+eval "$(declare -f verify_xhttp_cdn | sed '1s/^verify_xhttp_cdn/real_verify_xhttp_cdn/')"
+verify_xhttp_cdn() { printf 'verify %s %s\n' "$CDN_DOMAIN" "$CDN_PORT" >>"$TEST_ROOT/cdn-verify.log"; [[ ! -f $TEST_ROOT/fail-cdn ]]; }
+stage_cloudflared_binary() {
+  [[ ! -f $TEST_ROOT/fail-download ]] || die 'simulated download failure'
+  mkdir -p "$1"; printf '#!/usr/bin/env bash\necho cloudflared-mock\n' >"$1/cloudflared"; chmod 0755 "$1/cloudflared"
+}
+create_cloudflared_user() { :; }
+synthetic_token() {  # $1 = JSON body; never a real credential
+  python3 -c 'import base64, sys; print(base64.b64encode(sys.argv[1].encode()).decode().rstrip("="))' "$1" | tr -d '\r'
+}
+TOK=$(synthetic_token '{"a":"0123456789abcdef0123456789abcdef","t":"11111111-2222-3333-4444-555555555555","s":"c2VjcmV0LWZvci10ZXN0cw=="}')
+NOT_TUNNEL=$(synthetic_token '{"a":"0123456789abcdef0123456789abcdef","s":"c2VjcmV0LWZvci10ZXN0cw=="}')
+cdn_env() { CDN_DOMAIN=cdn.example.test CDN_TOKEN=$TOK CDN_PORT=18090; unset CDN_ADDRESS CDN_PATH; }
+
+# 12. VLESS + XHTTP behind a Cloudflare named tunnel: token parsing, config, client info, prompts.
+[[ $(cdn_token_tunnel_id "$TOK" | tr -d '\r') == 11111111-2222-3333-4444-555555555555 ]] || fail 'tunnel id not read from token'
+[[ $(cdn_extract_token "sudo cloudflared service install $TOK") == "$TOK" ]] || fail 'token not extracted from the install command'
+! cdn_token_tunnel_id "$NOT_TUNNEL" >/dev/null || fail 'token without tunnel id accepted'
+! cdn_token_tunnel_id 'not-a-token' >/dev/null || fail 'garbage token accepted'
+PROTOCOLS=xhttpcdn CDN_DOMAIN=cdn.example.test CDN_TOKEN=bad expect_failure validate_install_options
+grep -q 'CDN_TOKEN 无效' "$TEST_ROOT/operation.log" || fail 'bad token message'
+PROTOCOLS=xhttpcdn CDN_DOMAIN='bad host' CDN_TOKEN=$TOK expect_failure validate_install_options
+PROTOCOLS=vless,xhttpcdn REALITY_PORT=30002 CDN_PORT=30002 CDN_DOMAIN=cdn.example.test CDN_TOKEN=$TOK expect_failure validate_install_options
+PROTOCOLS=xhttpcdn CDN_DOMAIN=cdn.example.test CDN_TOKEN=$TOK CDN_ADDRESS='104.16.0.1:443' expect_failure validate_install_options
+cdn_env; CDN_TOKEN="sudo cloudflared service install $TOK" CDN_ADDRESS=104.16.0.1
+fixture vless,xhttpcdn
+python3 - "$APP_DIR" "$UNIT_DIR" "$TOK" <<'PY'
+import json, pathlib, re, sys, urllib.parse
+p, units, tok = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+s = dict(l.split('=', 1) for l in (p/'state').read_text(encoding='utf-8').splitlines())
+assert s['PROTOCOLS'] == 'vless,xhttpcdn' and s['CDN_DOMAIN'] == 'cdn.example.test' and s['CDN_PORT'] == '18090'
+assert s['CDN_ADDRESS'] == '104.16.0.1' and re.fullmatch(r'[0-9a-f-]{36}', s['CDN_UUID']) and re.fullmatch(r'/[0-9a-f]{32}', s['CDN_PATH'])
+assert tok not in (p/'state').read_text(encoding='utf-8'), 'token must not be stored in state'
+assert (p/'cloudflared-cdn.env').read_text(encoding='utf-8') == f'TUNNEL_TOKEN={tok}\n'
+c = json.loads((p/'xray.json').read_text(encoding='utf-8'))
+assert [n['tag'] for n in c['inbounds']] == ['reality-guard', 'vless-reality', 'vless-xhttp-cdn']
+n = c['inbounds'][-1]
+assert n['listen'] == '127.0.0.1' and n['port'] == 18090 and n['protocol'] == 'vless'
+assert n['settings'] == {'clients': [{'id': s['CDN_UUID']}], 'decryption': 'none'}
+assert n['streamSettings'] == {'network': 'xhttp', 'xhttpSettings': {'path': s['CDN_PATH'], 'mode': 'auto'}}, 'no TLS / no noSSEHeader on the loopback inbound'
+unit = (units/'cloudflared-cdn-lite.service').read_text(encoding='utf-8')
+assert re.search(r'^EnvironmentFile=\S+/cloudflared-cdn\.env$', unit, re.M) and 'tunnel run' in unit and '--no-autoupdate' in unit
+assert 'User=cloudflared' in unit and tok not in unit
+info = (p/'client-info.txt').read_text(encoding='utf-8')
+link = next(l for l in info.splitlines() if l.startswith('vless://') and 'type=xhttp&host=' in l)
+u = urllib.parse.urlsplit(link); q = urllib.parse.parse_qs(u.query)
+assert u.username == s['CDN_UUID'] and u.hostname == '104.16.0.1' and u.port == 443 and u.fragment == 'vless-xhttp-cdn'
+assert q == {'encryption': ['none'], 'security': ['tls'], 'sni': ['cdn.example.test'], 'fp': ['chrome'], 'type': ['xhttp'],
+             'host': ['cdn.example.test'], 'path': [s['CDN_PATH']], 'mode': ['packet-up']}, q
+block = info.split('- name: vless-xhttp-cdn', 1)[1].split('\n\n', 1)[0].splitlines()[1:]
+assert block == ['  type: vless', '  server: "104.16.0.1"', '  port: 443', f'  uuid: "{s["CDN_UUID"]}"', '  network: xhttp',
+                 '  tls: true', '  udp: true', '  servername: "cdn.example.test"', '  client-fingerprint: chrome',
+                 '  xhttp-opts:', f'    path: "{s["CDN_PATH"]}"', '    host: "cdn.example.test"', '    mode: packet-up'], block
+assert any(l.startswith('vless://') and 'security=reality' in l for l in info.splitlines()), 'REALITY node kept'
+PY
+sed -i 's/^CDN_ADDRESS=.*/CDN_ADDRESS=2606:4700::1/' "$APP_DIR/state"
+write_client_info
+grep -q '^vless://[^@]*@\[2606:4700::1\]:443?' "$APP_DIR/client-info.txt" && grep -qx '  server: "2606:4700::1"' "$APP_DIR/client-info.txt" || fail 'IPv6 preferred address formatting'
+unset CDN_DOMAIN CDN_TOKEN CDN_PORT CDN_ADDRESS CDN_PATH
+configure_install >"$TEST_ROOT/ui.log" 2>&1 <<< $'5\n\nHTTPS://CDN.Example.Test/x\nbad-token\nsudo cloudflared service install '"$TOK"$'\n70000\n\n1.2.3.4:5\n\n'
+[[ $PROTOCOLS == xhttpcdn && $CDN_DOMAIN == cdn.example.test && $CDN_TOKEN == "$TOK" && $CDN_PORT == 30004 && $CDN_ADDRESS == cdn.example.test ]] ||
+  fail "interactive CDN input: $PROTOCOLS $CDN_DOMAIN $CDN_PORT $CDN_ADDRESS"
+for msg in 'token 无效' '端口应为' '应为域名或 IP' 'Service URL http://127.0.0.1:30004' '隧道 ID：11111111-2222-3333-4444-555555555555'; do
+  grep -q "$msg" "$TEST_ROOT/ui.log" || fail "prompt output missing: $msg"
+done
+! grep -q "$TOK" "$TEST_ROOT/ui.log" || fail 'token echoed to the terminal'
+pass 'xhttpcdn: token parsing/extraction, loopback inbound, env-only token, unit, link + mihomo, IPv6 address, prompts'
+
+# 13. add-xhttp-cdn / remove-xhttp-cdn keep other nodes; failures roll back; update covers the connector.
+fixture anytls
+cdn_env
+expect_failure do_add_xhttp_cdn
+grep -q '只装了 AnyTLS' "$TEST_ROOT/operation.log" || fail 'AnyTLS-only add must be refused'
+fixture vless
+cp -p "$APP_DIR/xray.json" "$TEST_ROOT/pre-cdn-xray.json"
+cdn_env
+touch "$TEST_ROOT/locked"; expect_failure do_add_xhttp_cdn; rm "$TEST_ROOT/locked"; assert_saved
+CDN_PORT=30002 expect_failure do_add_xhttp_cdn
+grep -q 'CDN_PORT 与已有节点端口重复' "$TEST_ROOT/operation.log" || fail 'port clash with REALITY not reported'
+BUSY_PORT=18090 expect_failure do_add_xhttp_cdn; assert_saved
+for fault in fail-xray fail-cdn fail-download; do
+  rm -f "$TEST_ROOT/services.log"; touch "$TEST_ROOT/$fault"
+  expect_failure do_add_xhttp_cdn
+  rm -f "$TEST_ROOT/$fault"
+  assert_saved
+  [[ ! -e $UNIT_DIR/cloudflared-cdn-lite.service && ! -e $APP_DIR/cloudflared-cdn.env && ! -e $BIN_DIR/cloudflared ]] || fail "$fault left tunnel files or a newly staged binary"
+  if [[ $fault != fail-download ]]; then grep -qx 'restart xray-lite.service' "$TEST_ROOT/services.log" || fail "$fault: Xray not restarted on rollback"; fi
+done
+rm -f "$TEST_ROOT/services.log" "$TEST_ROOT/cdn-verify.log"
+do_add_xhttp_cdn >"$TEST_ROOT/operation.log" 2>&1
+python3 - "$APP_DIR" "$TEST_ROOT/golden" "$TEST_ROOT/pre-cdn-xray.json" <<'PY'
+import json, pathlib, sys
+p, g, pre = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+read = lambda f: dict(l.split('=', 1) for l in f.read_text(encoding='utf-8').splitlines())
+now, old = read(p/'state'), read(g/'state')
+assert now['PROTOCOLS'] == 'vless,xhttpcdn' and now['CDN_DOMAIN'] == 'cdn.example.test' and now['CDN_ADDRESS'] == 'cdn.example.test'
+assert all(now[k] == v for k, v in old.items() if k != 'PROTOCOLS' and not k.startswith('CDN_')), 'existing credentials changed'
+c, o = json.loads((p/'xray.json').read_text(encoding='utf-8')), json.loads(pre.read_text(encoding='utf-8'))
+assert c['inbounds'][:-1] == o['inbounds'] and c['inbounds'][-1]['tag'] == 'vless-xhttp-cdn' and c['routing'] == o['routing']
+info, before = (p/'client-info.txt').read_text(encoding='utf-8'), (g/'client-info.txt').read_text(encoding='utf-8')
+reality = lambda t: [l for l in t.splitlines() if l.startswith('vless://') and 'security=reality' in l]
+assert reality(info) == reality(before) and '#vless-xhttp-cdn' in info
+PY
+[[ -s $UNIT_DIR/cloudflared-cdn-lite.service && -s $APP_DIR/cloudflared-cdn.env && -x $BIN_DIR/cloudflared ]] || fail 'add did not install connector files'
+grep -qx 'verify cdn.example.test 18090' "$TEST_ROOT/cdn-verify.log" || fail 'add did not verify the tunnel'
+grep -qx 'enable --now cloudflared-cdn-lite.service' "$TEST_ROOT/services.log" || fail 'connector not enabled'
+# Kept: the two failures that changed files and the success; the download failure changed nothing.
+[[ $(count_dirs "$APP_DIR"/backup-cdn-*) == 3 && $(count_dirs "$APP_DIR"/backup-cdn-*/candidate) == 0 ]] || fail 'add backup handling'
+expect_failure do_add_xhttp_cdn
+grep -q '已安装 XHTTP + CF 隧道' "$TEST_ROOT/operation.log" || fail 'second add must be refused'
+cp -p "$APP_DIR/state" "$APP_DIR/xray.json" "$APP_DIR/client-info.txt" "$APP_DIR/install.sh" "$TEST_ROOT/golden/"
+do_remove_xhttp_cdn <<< '' >"$TEST_ROOT/operation.log" 2>&1
+assert_saved
+touch "$TEST_ROOT/fail-xray"; expect_failure do_remove_xhttp_cdn --yes; rm "$TEST_ROOT/fail-xray"
+assert_saved
+[[ -e $UNIT_DIR/cloudflared-cdn-lite.service && -e $APP_DIR/cloudflared-cdn.env ]] || fail 'failed removal deleted tunnel files'
+rm -f "$TEST_ROOT/services.log"; touch "$TEST_ROOT/fail-start"
+expect_failure do_remove_xhttp_cdn --yes
+assert_saved
+grep -qx 'enable --now cloudflared-cdn-lite.service' "$TEST_ROOT/services.log" || fail 'failed removal did not restart the connector'
+do_remove_xhttp_cdn --yes >"$TEST_ROOT/operation.log" 2>&1
+cmp "$APP_DIR/xray.json" "$TEST_ROOT/pre-cdn-xray.json" || fail 'removal did not restore the original Xray config'
+grep -qx 'PROTOCOLS=vless' "$APP_DIR/state" && ! grep -qE '^CDN_[A-Z]+=.+' "$APP_DIR/state" || fail 'removal left CDN state'
+[[ ! -e $UNIT_DIR/cloudflared-cdn-lite.service && ! -e $APP_DIR/cloudflared-cdn.env && -x $BIN_DIR/cloudflared ]] || fail 'removal files (binary must stay)'
+! grep -q 'vless-xhttp-cdn' "$APP_DIR/client-info.txt" || fail 'removed node still shown'
+cdn_env
+menu >"$TEST_ROOT/menu.log" 2>&1 <<< $'13\n0'
+grep -q '^PROTOCOLS=vless,xhttpcdn$' "$APP_DIR/state" || fail 'menu 13 did not add'
+menu >"$TEST_ROOT/menu.log" 2>&1 <<< $'14\ny\n0'
+trap cleanup EXIT
+grep -q '^PROTOCOLS=vless$' "$APP_DIR/state" || fail 'menu 14 did not remove'
+cdn_env; fixture xhttpcdn
+expect_failure do_remove_xhttp_cdn --yes
+grep -q '只安装了 XHTTP' "$TEST_ROOT/operation.log" || fail 'CDN-only removal must point to uninstall'
+cdn_env; fixture vless,anytls,xhttpcdn
+do_remove_anytls --yes >"$TEST_ROOT/operation.log" 2>&1
+grep -qx 'PROTOCOLS=vless,xhttpcdn' "$APP_DIR/state" || fail 'remove-anytls broke when another protocol follows anytls'
+(
+  cdn_env; fixture vless,xhttpcdn
+  stage_binaries() { mkdir -p "$1"; for b in xray cloudflared; do printf '#!/usr/bin/env bash\nexit 0\n# candidate\n' >"$1/$b"; chmod 0755 "$1/$b"; done; }
+  for b in xray cloudflared; do printf '#!/usr/bin/env bash\nexit 0\n# installed\n' >"$BIN_DIR/$b"; chmod 0755 "$BIN_DIR/$b"; cp -p "$BIN_DIR/$b" "$TEST_ROOT/old-$b"; done
+  rm -f "$TEST_ROOT/services.log" "$TEST_ROOT/cdn-verify.log"; touch "$TEST_ROOT/fail-cdn"
+  expect_failure apply_update
+  rm "$TEST_ROOT/fail-cdn"
+  cmp "$BIN_DIR/cloudflared" "$TEST_ROOT/old-cloudflared" && cmp "$BIN_DIR/xray" "$TEST_ROOT/old-xray" || fail 'failed update did not restore binaries'
+  rm -f "$TEST_ROOT/services.log"
+  apply_update >"$TEST_ROOT/operation.log" 2>&1
+  grep -qx 'restart xray-lite.service cloudflared-cdn-lite.service' "$TEST_ROOT/services.log" || fail "update restart list: $(tr '\n' ';' <"$TEST_ROOT/services.log")"
+  grep -q '# candidate' "$BIN_DIR/cloudflared" || fail 'update did not replace cloudflared for the CDN node'
+  [[ $(grep -c '^verify ' "$TEST_ROOT/cdn-verify.log") == 2 ]] || fail 'update did not re-verify the tunnel'
+)
+pass 'add/remove xhttpcdn: refusals, lock, port clash, xray/verify/download/restart failures restore; menu 13/14; update'
+
+# 14. The post-start check reads the tunnel route from the connector log and proxies through it.
+CDN_DOMAIN=cdn.example.test CDN_PORT=18090 CDN_VERIFY_TRIES=1
+cdn_probe() { [[ ! -f $TEST_ROOT/fail-probe ]]; }
+cdn_connector_log() { cat "$TEST_ROOT/connector.log" 2>/dev/null || true; }
+route() {  # $1 = service for cdn.example.test ('' = no rule for the host)
+  local rules='{\"service\":\"http_status:404\"}'
+  [[ -z $1 ]] || rules='{\"hostname\":\"cdn.example.test\",\"service\":\"'"$1"'\"},'"$rules"
+  printf '%s\n' '2026-11-18T05:20:00Z INF Starting tunnel tunnelID=11111111-2222-3333-4444-555555555555' \
+    '2026-11-18T05:20:01Z INF Updated to new configuration config="{\"ingress\":[{\"hostname\":\"old.example.test\",\"service\":\"http://127.0.0.1:1\"}],\"warp-routing\":{\"enabled\":false}}" version=1' \
+    '2026-11-18T05:20:02Z INF Updated to new configuration config="{\"ingress\":['"$rules"'],\"warp-routing\":{\"enabled\":false}}" version=2' \
+    >"$TEST_ROOT/connector.log"
+}
+route http://127.0.0.1:18090; real_verify_xhttp_cdn >"$TEST_ROOT/operation.log" 2>&1 || fail 'matching route rejected'
+route http://localhost:18090/; real_verify_xhttp_cdn >"$TEST_ROOT/operation.log" 2>&1 || fail 'localhost route rejected'
+route http://127.0.0.1:8080; expect_failure real_verify_xhttp_cdn
+grep -q 'http://127.0.0.1:8080，应为 http://127.0.0.1:18090' "$TEST_ROOT/operation.log" || fail 'wrong port not explained'
+route https://127.0.0.1:18090; expect_failure real_verify_xhttp_cdn
+route ''; expect_failure real_verify_xhttp_cdn
+grep -q 'Service URL http://127.0.0.1:18090' "$TEST_ROOT/operation.log" || fail 'missing route hint'
+rm -f "$TEST_ROOT/connector.log"; expect_failure real_verify_xhttp_cdn
+grep -q '没有读到隧道的远程路由配置' "$TEST_ROOT/operation.log" || fail 'missing remote configuration not explained'
+route http://127.0.0.1:18090; touch "$TEST_ROOT/fail-probe"; expect_failure real_verify_xhttp_cdn; rm "$TEST_ROOT/fail-probe"
+grep -q 'CNAME' "$TEST_ROOT/operation.log" || fail 'proxy failure not explained'
+unset CDN_VERIFY_TRIES
+pass 'tunnel check: latest remote route must be http://127.0.0.1|localhost:port; mismatch/missing/no-config/probe failures explained'
 printf 'Review fixes: %s checks passed; package manager/systemd/downloads mocked.\n' "$passed"

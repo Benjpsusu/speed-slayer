@@ -528,6 +528,21 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 
 ## 修改记录（溯源）
 
+### 2026-11-18 — Lite review 版：新协议 VLESS + XHTTP + Cloudflare 命名隧道
+
+- **目的**：用户有一台服务器 TCP 全断，需要让 XHTTP 走 Cloudflare CDN。实测免域名的快速隧道（trycloudflare）会把流式响应正文攒到最后才发，XHTTP 在所有模式下都不通（VMess + WS 不受影响）；用户自有域名的命名隧道则可用。
+- **改动**（只改 review 文件）：`install-review.sh` 新增协议 `xhttpcdn`（新装勾选 5；菜单 13 / `add-xhttp-cdn` 追加；菜单 14 / `remove-xhttp-cdn` 移除）。Xray 入站只监听 127.0.0.1；独立的 `cloudflared-cdn-lite` 用 token 运行命名隧道，token 只存在 root 0600 的 env 文件里。上线时读取 Cloudflare 下发的路由核对端口，并经 Cloudflare 走一遍完整代理链路自检，失败回滚。`show` 输出 `packet-up` 的链接和 mihomo 片段；更新、卸载、状态都覆盖了连接器。顺带修复 `remove-anytls` 依赖协议顺序的问题。用法见 `speed-slayer-lite/README-review.md`。
+- **涉及文件**：`speed-slayer-lite/install-review.sh`、`test-review-cases.sh`、`README-review.md`；本 README 与 Lite README 只追加记录。
+- **验证**：`test-review.sh` 共 87 项通过；新增 3 组用例在改动前全部失败、改动后全部通过。在测试机上用真实命名隧道依次验证：填错端口会被准确识别并回滚；追加成功（10 秒）；用 `show` 输出搭建的 Xray 和 mihomo 客户端经 Cloudflare 可用；移除后 `xray.json` 与追加前一字不差，REALITY 正常；只装该协议的全新安装（14 秒）、卸载、从备份恢复都正常。
+- **未验证与边界**：没有从国内实际连接，也没有在 IP 真正被封的机器上安装；只在 Debian 13 / amd64 上实测。同一个 token 不能同时在两台机器上运行。
+
+### 2026-11-18 — Lite review 文档：补充 Windows PowerShell 的目标站扫描写法
+
+- **目的**：用户在 Windows PowerShell 里运行 `README-review.md` 中的 bash 管道（`cut`/`grep`/`sort`）时报 `参数列表中缺少参量`。
+- **改动**：`speed-slayer-lite/README-review.md` 补充 PowerShell 写法：扫描器用完整路径运行；用 `Import-Csv` 按表头提取域名，兼容新旧两种格式；生成一行 VPS 命令并复制到剪贴板。同时说明 `>` 和 `Set-Content` 写出的文件 bash 无法正确读取，并提醒扫描前关闭本机代理的 TUN。没有修改脚本。
+- **验证**：样本 CSV 在 Windows PowerShell 5.1 和 PowerShell 7.6 中提取结果正确；写出的 LF、无 BOM 文件在 bash 中校验有效。
+- **未验证**：没有实际运行 RealiTLScanner，也没有在用户的终端里执行。
+
 ### 2026-11-18 — Lite review 版：Xray 26.11.9、AnyTLS 关闭 MPTCP、REALITY SNI 管理与 mihomo 片段
 
 - **目的**：AnyTLS 端口再次被封，用户改用 VLESS + XHTTP + REALITY，需要换 SNI、检查目标站，并得到可用的 mihomo 配置。排查中发现 Lite 固定的 Xray `26.10.21` 早于 `26.10.31` 的 MPTCP 紧急安全更新：Linux 内核 IPv4 MPTCP 监听可被远程拿到 root，而 Go 1.24+ 默认开启 MPTCP。sing-box `1.14.4`（Go 1.25）的 AnyTLS 监听同样开着 MPTCP。

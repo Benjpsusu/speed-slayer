@@ -105,6 +105,21 @@
 - `show` 在 VLESS 链接后输出完整的 mihomo YAML 片段，所有字符串值都加了引号，避免纯数字 shortId 被解析成数字。IPv6 地址不带方括号。XHTTP 和旧的 TCP + Vision 节点各自输出对应写法。
 - **服务端不设 `minClientVer`**：mihomo（Meta 与 Alpha 分支）和 sing-box 都把 REALITY 客户端版本写死为 `1.8.2`，设成 `1.8.3` 会把它们全部拒绝。下面的端到端测试已验证这一点。
 
+### 12. 新协议：VLESS + XHTTP + Cloudflare 命名隧道（勾选 5 / 菜单 13、14）
+
+适用场景：服务器 IP 被封（TCP 全断），但服务器自己访问外网正常。链路是 `客户端 → Cloudflare 节点 → 命名隧道 → 本机 127.0.0.1`。Cloudflare 回源这一段在境外，所以 IP 被封不影响；本机也**不需要开放任何入站端口**。
+
+- **必须用自有域名的命名隧道**。实测免域名的快速隧道（trycloudflare）会把流式响应的正文攒到最后才发出（官方文档也写明不支持 SSE），XHTTP 的下行因此在所有模式下都不通；VMess + WS 不受影响。命名隧道实测首个正文字节 0.06 秒就到达。
+- **服务端**：新增入站 `vless-xhttp-cdn`，只监听 `127.0.0.1:CDN_PORT`（默认 30004），不开 TLS，模式 `auto`，保留默认的 SSE 响应头。UUID 和路径单独生成，与 REALITY 节点互不影响。
+- **连接器**：新服务 `cloudflared-cdn-lite` 以 `cloudflared` 用户运行 `tunnel run`。token 只保存在 `cloudflared-cdn.env`（root 0600），不写入 state，也不会打印出来。
+- **输入**：交互时要填主机名和 token（输入时不显示，可以直接粘贴整条 `cloudflared service install eyJ…` 命令），端口和客户端连接地址可选。连接地址默认是主机名，也可以填 Cloudflare 优选域名或 IP。token 会解码校验，必须包含隧道 ID。
+- **上线自检**：启动后从连接器日志读取 Cloudflare 下发的远程路由，确认该主机名指向 `http://127.0.0.1:端口`（或 `localhost`），不一致时直接说明后台应该怎么改。然后用一个临时 Xray 客户端经 Cloudflare 走完整代理链路（`packet-up` 访问 generate_204）。任一步失败都会回滚。
+- **客户端**：`show` 输出 `mode=packet-up` 的 vless 链接和 mihomo 片段。经 Cloudflare 实测：`packet-up` 和 `auto` 可用；`stream-up` 需要在域名设置里打开 gRPC；`stream-one` 不可用。
+- **追加 / 移除**：`add-xhttp-cdn`（菜单 13）在已有节点上追加，只是加一个入站后重启 Xray，原有凭据不变。`remove-xhttp-cdn [--yes]`（菜单 14）删除入站、连接器和 token，`xray.json` 恢复成和追加前一字不差。两者都有维护锁、备份，失败会回滚。只装了 AnyTLS 时暂不支持追加，移除后只剩 AnyTLS 的情况也暂不支持（请卸载重装）。
+- **更新 / 卸载 / 状态**：`update` 会一并更新 cloudflared，重启连接器并重新自检，失败回滚。卸载会清理连接器、单元和 token；`status` 会显示连接器状态。
+- **同一个 token 不要同时在两台机器上运行**：Cloudflare 会把请求分给两台机器，XHTTP 的上下行会落到不同机器上导致断开。把隧道换到另一台机器之前，先在原机器执行菜单 14 移除。
+- 顺带修复：`remove-anytls` 原来用 `${PROTOCOLS%,anytls}` 删除协议，要求 anytls 必须排在最后；新协议排在它后面时会删除失败。现改为与顺序无关的写法。
+
 ## 与原版的行为差异（使用前请看）
 
 - **`SCRIPT_URL` 指向 `install-review.sh`**。用 review 版安装后，`update` 以及通过 `bash <(curl …)` 运行时的自我安装，都会从仓库的 `speed-slayer-lite/install-review.sh` 下载，因此需要先把该文件上传到同一路径。正式采纳（改名为 `install.sh`）时，请把第 13 行的 `SCRIPT_URL` 改回 `install.sh`。
@@ -114,6 +129,7 @@
 - （2026-11-18）`update` 会把 Xray 换成 26.11.9；已有 AnyTLS 的单元会被改写一次，加入 `GODEBUG=multipathtcp=0`。
 - （2026-11-18）菜单新增 `11`、`12`；`show` 的输出多了 mihomo 片段，原有链接不变。
 - （2026-11-18）Xray 每次刚启动或重启时，REALITY 会先探测目标站握手后的记录长度。探测完成前进来的连接会等待约 5 秒，之后恢复正常。这是 REALITY 本身的机制，与本次改动无关；测试中观察到，记录在此，以免被误判为故障。
+- （2026-11-18）协议勾选新增 `5`（VLESS + XHTTP + Cloudflare 隧道）；`a` 只全选 1–4，因为 5 需要自有域名和 token。菜单新增 `13`、`14`。`PROTOCOLS` 新增取值 `xhttpcdn`。
 
 ## 用法
 
@@ -139,16 +155,49 @@ sudo speed-slayer-lite check-reality-target
 sudo speed-slayer-lite set-reality-sni speedtest.wobcom.de
 sudo speed-slayer-lite set-reality-sni some.example.com --force
 
+# VLESS + XHTTP + Cloudflare 命名隧道（IP 被封也能用；需要托管在 Cloudflare 的自有域名）
+# 1. Cloudflare 后台 Networking → Tunnels → Create a tunnel，复制安装命令里 eyJ 开头的 token
+# 2. 该隧道 → Routes → Add route → Published application：主机名 xhttp.example.com，Service URL http://127.0.0.1:30004
+# 3. 新装：一键菜单里选 1 并勾选 5；或者非交互（以 root 运行，新机器上还没有 speed-slayer-lite 命令）：
+PROTOCOLS=xhttpcdn CDN_DOMAIN=xhttp.example.com CDN_TOKEN='eyJ...' bash <(curl -fsSL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install-review.sh) install
+#    已有节点上追加 / 移除：
+sudo CDN_DOMAIN=xhttp.example.com CDN_TOKEN='eyJ...' speed-slayer-lite add-xhttp-cdn
+sudo speed-slayer-lite remove-xhttp-cdn --yes
+# 可选：CDN_PORT（本机端口，默认 30004，必须与 Service URL 一致）、CDN_ADDRESS（客户端连接地址，可填优选域名或 IP）
+
 # 新装时直接指定 SNI
 sudo PROTOCOLS=vless REALITY_SERVER_NAME=speedtest.wobcom.de speed-slayer-lite install
 ```
 
-**找离 VPS 近、又不是大厂的目标站**：在**本地**（不要在 VPS 上，官方说明扫描可能导致 VPS 被标记）用 XTLS 官方的 [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) 扫描 VPS 所在网段，再把候选站点交给 `check-reality-target` 在 VPS 上复核：
+**找离 VPS 近、又不是大厂的目标站**：在**本地电脑**上（不要在 VPS 上，官方说明扫描可能导致 VPS 被标记）用 XTLS 官方的 [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) 扫描 VPS 所在网段，再把候选站点交给 `check-reality-target` 在 VPS 上复核。
+
+扫描前先**关闭本机代理软件的 TUN / 全局模式**，或者把 VPS 网段设为直连。否则扫描流量可能经由代理节点（甚至就是这台 VPS）发出，等于还是在 VPS 上扫描。`-addr` 要写成 CIDR；只写一个 IP 会无限向外扩展扫描。
+
+Windows（PowerShell 5.1 或 7 均可，逐段粘贴执行）：
+
+```powershell
+# 1. 扫描（扫描器在“下载”文件夹，结果写到桌面）
+Set-Location "$env:USERPROFILE\Desktop"
+& "$env:USERPROFILE\Downloads\RealiTLScanner-windows-64.exe" -addr '你的VPS_IP/24' -port 443 -thread 20 -timeout 5 -out near.csv
+
+# 2. 取出证书域名：去掉通配符、去重，生成一行 VPS 命令并复制到剪贴板
+$list = @(Import-Csv -LiteralPath .\near.csv -Encoding UTF8 |
+    ForEach-Object { "$($_.CERT_DOMAIN)".Trim().ToLower() } |
+    Where-Object { $_ -and $_ -notmatch '\*' } | Sort-Object -Unique)
+"$($list.Count) candidates"
+$cmd = 'speed-slayer-lite check-reality-target ' + ($list -join ' ')
+$cmd; $cmd | Set-Clipboard
+```
+
+然后在 VPS 的 SSH 窗口里粘贴运行这一行。不要用 PowerShell 的 `>` 生成文件再传到 VPS：Windows PowerShell 5.1 的 `>` 会写成 UTF-16，`Set-Content` 会写 CRLF，bash 读到后会把域名当作无效。确实需要文件时，用 `[IO.File]::WriteAllText((Join-Path (Get-Location) 'candidates.txt'), ($list -join "`n") + "`n")` 写出不带 BOM 的 UTF-8 + LF 文件。
+
+Linux / macOS / Git Bash：
 
 ```bash
-./RealiTLScanner -addr 你的VPS_IP/24 -port 443 -thread 20 -timeout 5 -out near.csv   # 写 CIDR；只写 IP 会无限向外扩
-cut -d, -f9 near.csv | tail -n +2 | grep -v '\*' | sort -u > candidates.txt         # 第 9 列是 CERT_DOMAIN
-speed-slayer-lite check-reality-target $(cat candidates.txt)                        # 在 VPS 上运行
+./RealiTLScanner -addr 你的VPS_IP/24 -port 443 -thread 20 -timeout 5 -out near.csv
+cut -d, -f9 near.csv | tail -n +2 | grep -v '\*' | sort -u > candidates.txt   # 第 9 列是 CERT_DOMAIN（新版 11 列格式）
+speed-slayer-lite check-reality-target $(cat candidates.txt)                  # 在 VPS 上运行
 ```
 
 扫描器按 IP 扫描时不发送 SNI，也不校验证书，所以结果必须复核。挑选标准：结论列显示"可用"；IP 列落在 VPS 所在网段（如果解析到 CDN，说明并不近）；CONN_MS 越小越好。挑出 CDN 和大厂之外的普通网站。
@@ -212,6 +261,27 @@ bash test-review.sh
 
   A 和 D 在 Xray 刚启动时约需 6 秒；预热 8 秒后再测 A 只需 1.06 秒，原因见"行为差异"。Xray 26.11.9 的 freedom 出站会拦截私有地址（`target blocked by a finalrule`），所以测试目标选了公网 IP，没有用本地 HTTP 服务或 fake-ip 域名。
 
+### 2026-11-18 第 12 项（XHTTP + Cloudflare 隧道）的验证
+
+**本地**（Windows Git Bash，通过 pwsh 调用）：
+- `bash -n` 通过。`bash test-review.sh` 退出码 0，共 87 项通过：原有 XHTTP 13、管理 23、AnyTLS 37，review 回归 14。新增第 12–14 组用的都是合成 token，不含真实凭据。
+- **红绿验证**：第 12–14 组逐组对 GitHub 上的改动前版本运行，3/3 失败（`cdn_token_tunnel_id: command not found`、`AnyTLS-only add must be refused`、`matching route rejected`）；对新版本运行 3/3 通过。
+- 测试过程中修掉了 3 个实现问题：追加成功后没有删除下载暂存目录 `candidate/`；什么都没改成的失败会留下无用备份；state 原来经环境变量写入，在 Git Bash 下路径形状的值会被改写，现改为从 stdin 传入。
+
+**测试机实测**（Debian 13，用户自有域名下的一条命名隧道，路由为 `主机名 → http://127.0.0.1:18090`；仓库公开，所以不写出具体域名；测试前先完整备份 Lite）：
+
+| 步骤 | 结果 |
+| --- | --- |
+| 方案验证：快速隧道 + XHTTP（Xray / mihomo，所有模式） | 全部失败；流式正文被攒到最后才发出 |
+| 方案验证：命名隧道 + XHTTP | `packet-up` / `auto` / 优选 IP 可用，下行约 16–17 MB/s，上行 7–14 MB/s；`stream-up`（未开 gRPC）、`stream-one` 不可用 |
+| A. 在已有 VLESS 节点上追加，故意填错端口 18091 | 读出真实路由，报"转发到 http://127.0.0.1:18090，应为 …18091"；回滚后 `xray.json` 不变，单元和 token 都已删除 |
+| B. 用正确端口追加 | 10 秒完成并通过自检；原入站不变；token 文件为 root 600 |
+| 用 `show` 输出搭建客户端 | Xray（vless 链接）和 mihomo（YAML 片段）经 Cloudflare 均可用：204、下载 20 MB、上传 5 MB 都成功 |
+| C. `remove-xhttp-cdn --yes` | `xray.json` 与追加前一字不差；CDN state、token、单元都已删除；REALITY 回环测试仍为 204 |
+| D–F. 卸载后只用 `PROTOCOLS=xhttpcdn` 全新安装 | 14 秒完成：下载并校验 Xray 26.11.9 和 cloudflared 2026.10.3，自检通过；只监听 127.0.0.1；`show`、`status` 正常；卸载清理干净 |
+| G. 从备份恢复原安装 | state 和 `xray.json` 的哈希与备份前一致；REALITY 为 204 |
+| H. 用新脚本再次追加，供用户从国内测试 | 已在测试机上运行 |
+
 ## 未验证
 
 - 没有在真实 OpenSSL 1.1.1（Debian 11 / Ubuntu 20.04）上实测。第 1 项的结论依据 OpenSSL、Debian 和 Go 的源码，以及上面的模拟测试；建议在 Debian 11 容器或 VPS 上跑一次自签安装。
@@ -223,8 +293,25 @@ bash test-review.sh
 - （2026-11-18）**这次改动不修复内核漏洞**，只是减少暴露面；请按发行版的安全公告升级内核。
 - （2026-11-18）arm64 版 Xray 只核对了摘要，没有运行。端到端只测了 mihomo v1.19.34（Windows）；sing-box 和 v2rayN 客户端这次没有做端到端测试。
 - （2026-11-18）RealiTLScanner 的用法和 CSV 列号来自其 README 和 `main.go` 源码，本次没有实际扫描。
+- （2026-11-18，第 12 项）所有隧道测试的客户端都跑在测试机上，Cloudflare 节点离得很近，**没有从国内实际连接测试**，国内的速度和可用性取决于连到的 Cloudflare 节点和优选 IP。没有在 IP 真正被封的机器上安装过。只在 Debian 13 / amd64 上实测，arm64、Ubuntu 和交互式输入在真实终端里的表现没有测。与 VMess（Argo）同时安装、在只装 AnyTLS 的机器上新装组合，只有替身测试。`stream-up` 在打开 gRPC 后的表现没有测。
 
 ## 修改记录（溯源）
+
+### 2026-11-18 — 新协议 VLESS + XHTTP + Cloudflare 命名隧道
+
+- 目的：用户有一台机器 TCP 全断，想让 XHTTP 走 Cloudflare。实测快速隧道无法承载 XHTTP，命名隧道可以，所以把它做成 Lite 的协议选项。
+- 改动：见上文第 12 项。新装勾选 5；追加菜单 13 / `add-xhttp-cdn`；移除菜单 14 / `remove-xhttp-cdn`；更新、卸载、状态都覆盖了连接器。顺带修复 `remove-anytls` 依赖协议顺序的问题。
+- 涉及文件：`install-review.sh`、`test-review-cases.sh`（第 12–14 组）、`README-review.md`；根 `README.md` 和 Lite `README.md` 只追加修改记录。原 `install.sh` 和原有测试未改动。
+- 验证：见"2026-11-18 第 12 项的验证"。
+- 未验证：见"未验证"中标注第 12 项的条目。
+
+### 2026-11-18 — 补充 Windows PowerShell 的目标站扫描写法
+
+- 目的：用户在 Windows PowerShell 里运行文档给出的 `cut … | grep … | sort` 时报 `参数列表中缺少参量`，因为这些是 bash 命令，而扫描本来就建议在本地电脑上做。
+- 改动：在"用法"中补充 PowerShell 写法。扫描器用完整路径运行；用 `Import-Csv` 按表头取 `CERT_DOMAIN`，兼容 11 列和旧版 5 列格式；去掉通配符、去重，生成一行 VPS 命令并复制到剪贴板。说明 `>`（UTF-16）和 `Set-Content`（CRLF）为什么不能用来生成给 bash 的文件。补充扫描前关闭本机代理 TUN 的提醒。原 bash 写法保留，并注明只适用于 11 列格式。
+- 涉及文件：`README-review.md`；根 `README.md` 和 Lite `README.md` 只追加记录。没有修改脚本。
+- 验证：用样本 CSV（11 列、旧 5 列、含引号的签发者字段、通配符和重复域名）在 Windows PowerShell 5.1.19041 与 PowerShell 7.6.9 中运行提取命令，结果正确。写出的文件为 LF、无 BOM；在 bash 中经 `reality_target_normalize` / `validate_domain` 校验有效。
+- 未验证：没有实际运行 RealiTLScanner（本机没有用户的 `near.csv`）；`Set-Clipboard` 和整段粘贴只按语法确认，没有在用户的终端里实际执行。
 
 ### 2026-11-18 — Xray 26.11.9、AnyTLS 关闭 MPTCP、REALITY SNI 管理与 mihomo 片段
 
