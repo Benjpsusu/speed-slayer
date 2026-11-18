@@ -315,6 +315,13 @@ Quick Tunnel 适合测试，域名可能随重启变化。需要稳定域名时�
 
 ## 修改记录（溯源）
 
+### 2026-11-18 — review 版：Xray 26.11.9、AnyTLS 关闭 MPTCP、REALITY SNI 管理与 mihomo 片段
+
+- 只修改 review 文件（`install-review.sh`、`test-review-cases.sh`、`README-review.md`）；本目录的 `install.sh` 和原有测试未改动。所以本文"用法"章节不变，新命令 `set-reality-sni`、`check-reality-target`（菜单 11/12）的用法写在 `README-review.md`。
+- Xray 从 `26.10.21` 升级到 `26.11.9`，`26.10.31` 起默认关闭 MPTCP 监听（内核 IPv4 MPTCP 远程提权漏洞）。AnyTLS 单元加入 `GODEBUG=multipathtcp=0`，`update` 会给旧单元补上。`show` 增加带 `support-x25519mlkem768: true` 的 mihomo 片段；服务端不设 `minClientVer`（mihomo 和 sing-box 上报的版本都是 1.8.2）。
+- 验证：`test-review.sh` 共 84 项通过；新增 4 组用例在改动前全部失败、改动后全部通过；真实 Xray `26.11.9` 校验配置；真实 Xray + mihomo `v1.19.34` 回环测试中，带开关能连通，去掉开关或设 `minClientVer 1.8.3` 都会被拒绝。完整记录见根 README 同日条目和 `README-review.md`。
+- 未验证：Linux VPS 上实际运行新命令和 `update`、`GODEBUG` 在 Linux 上的效果、arm64 Xray 运行。关闭 MPTCP 不能代替升级内核。
+
 ### 2026-11-05 — 自签证书、免 SNI 的 IP 直连
 
 - 按用户要求新增证书方式 `3` / `selfsigned`，不需要域名、SNI、邮箱或 TCP 80；支持手填或自动检测 IPv4/IPv6，严格校验地址，生成包含 IP SAN 的 ECDSA 自签证书。原来的 ACME 和外部证书方式保留。

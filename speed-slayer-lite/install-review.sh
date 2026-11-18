@@ -11,7 +11,8 @@ readonly UNIT_DIR="/etc/systemd/system"
 readonly SHORTCUT="/usr/local/sbin/${APP}"
 # Self-updates and re-downloads stay on the review build; point back to install.sh when adopting it.
 readonly SCRIPT_URL="https://raw.githubusercontent.com/Benjpsusu/speed-slayer/refs/heads/main/speed-slayer-lite/install-review.sh"
-readonly XRAY_VERSION="26.10.21"
+# 26.10.31+ turns off the MPTCP listeners Go 1.24+ enables by default (kernel IPv4 MPTCP RCE).
+readonly XRAY_VERSION="26.11.9"
 readonly CLOUDFLARED_VERSION="2026.10.3"
 readonly SINGBOX_VERSION="1.14.4"
 readonly BACKUP_KEEP=3
@@ -115,11 +116,11 @@ detect_arch() {
   case $(uname -m) in
     x86_64|amd64)
       XRAY_ARCH=64 CF_ARCH=amd64
-      XRAY_SHA=0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978
+      XRAY_SHA=b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82
       CF_SHA=053b80b0a23031a038fdbf3c073f59f82b8f1f152aa67971d7383ffafc0dbab0 ;;
     aarch64|arm64)
       XRAY_ARCH=arm64-v8a CF_ARCH=arm64
-      XRAY_SHA=d1304946c486d98e6b886e9b931eaaaebb23835b30e217638037b7f2721d4e9c
+      XRAY_SHA=64ed6858982a7f5eb85d88b811089063bd4f17561f4c8f44e0f1dc8e6f6430be
       CF_SHA=89297ebfb9e8c99c0dc013a1140601453cf3798d8306c5591651f4a3f5210be8 ;;
     *) die '仅支持 amd64 和 arm64' ;;
   esac
@@ -496,6 +497,9 @@ PY
   chmod 0640 "$APP_DIR/anytls.json"
 }
 
+# sing-box 1.14.4 is built with Go 1.25, whose listeners use MPTCP unless told otherwise;
+# GODEBUG keeps the public AnyTLS port on plain TCP (same mitigation as Xray 26.10.31+).
+readonly ANYTLS_NO_MPTCP='Environment=GODEBUG=multipathtcp=0'
 write_anytls_unit() {
   cat >"$UNIT_DIR/anytls-lite.service" <<EOF
 [Unit]
@@ -506,6 +510,7 @@ Wants=network-online.target
 [Service]
 User=speed-anytls
 Group=speed-anytls
+$ANYTLS_NO_MPTCP
 $(if [[ $ANYTLS_PORT == 443 || $ANYTLS_CERT_MODE == acme ]]; then printf 'AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE'; fi)
 ExecStart=$APP_DIR/bin/sing-box run -c $APP_DIR/anytls.json
 Restart=on-failure
@@ -833,6 +838,8 @@ if 'ss2022' in selected:
     nodes.append({'tag': 'ss2022', 'port': int(s['SS_PORT']), 'protocol': 'shadowsocks',
                   'settings': {'method': '2022-blake3-aes-128-gcm', 'password': s['SS_PASSWORD'], 'network': 'tcp,udp'}})
 if 'vless' in selected:
+    # minClientVer stays unset: mihomo and sing-box report REALITY client version 1.8.2,
+    # so a floor such as 1.8.3 would push them to the fallback site.
     nodes.extend([
         {'tag': 'reality-guard', 'listen': '127.0.0.1', 'port': int(s['REALITY_GUARD_PORT']), 'protocol': 'dokodemo-door',
          'settings': {'address': s['REALITY_SERVER_NAME'], 'port': 443, 'network': 'tcp'},
@@ -1023,6 +1030,7 @@ write_client_info() (
     uri=$(vless_uri "$server" "$VLESS_TRANSPORT" "$XHTTP_PATH")
     if [[ $VLESS_TRANSPORT == xhttp ]]; then label='VLESS + XHTTP + REALITY'; else label='VLESS + TCP + REALITY + Vision（尚未迁移）'; fi
     content+="$label"$'\n'"$uri"$'\n\n'
+    content+="$(mihomo_vless_yaml "$server")"$'\n\n'
   fi
   if protocol_enabled anytls; then
     if [[ $ANYTLS_CERT_MODE == selfsigned ]]; then
@@ -1051,6 +1059,23 @@ vless_uri() {
   esac
   printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&%s#%s\n' \
     "$VLESS_UUID" "$server" "$REALITY_PORT" "$REALITY_SERVER_NAME" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$options" "$label"
+}
+
+# mihomo drops the X25519MLKEM768 key share unless told otherwise, and current REALITY
+# servers treat such a Client Hello as unauthenticated, so the flag is mandatory.
+mihomo_vless_yaml() {
+  local server=${1#[} name=vless-xhttp-reality
+  server=${server%]}
+  [[ $VLESS_TRANSPORT == xhttp ]] || name=vless-reality
+  printf 'mihomo（Clash Meta）配置片段（support-x25519mlkem768: true 不能删，否则服务端拒绝握手）：\n'
+  printf -- '- name: %s\n  type: vless\n  server: "%s"\n  port: %s\n  uuid: "%s"\n' "$name" "$server" "$REALITY_PORT" "$VLESS_UUID"
+  if [[ $VLESS_TRANSPORT == xhttp ]]; then
+    printf '  network: xhttp\n  xhttp-opts:\n    path: "%s"\n' "$XHTTP_PATH"
+  else
+    printf '  network: tcp\n  flow: xtls-rprx-vision\n'
+  fi
+  printf '  tls: true\n  udp: true\n  servername: "%s"\n  client-fingerprint: chrome\n' "$REALITY_SERVER_NAME"
+  printf '  reality-opts:\n    public-key: "%s"\n    short-id: "%s"\n    support-x25519mlkem768: true\n' "$REALITY_PUBLIC" "$REALITY_SHORT_ID"
 }
 
 configure_install() {
@@ -1094,7 +1119,7 @@ configure_install() {
   set_protocols "$value" || return 1
   if protocol_enabled vless; then
     while true; do
-      printf '\nVLESS SNI：1. 默认 learn.microsoft.com  2. 自定义\n'
+      printf '\nVLESS SNI：1. 默认 learn.microsoft.com  2. 自定义（可先用菜单 12 检查候选站）\n'
       read -r -p '请选择 [1]: ' sni_mode || return 1
       case ${sni_mode:-1} in
         1) REALITY_SERVER_NAME=learn.microsoft.com; break ;;
@@ -1385,6 +1410,218 @@ do_migrate_xhttp() (
   log '请重新导入 VLESS 链接；如 Quick Tunnel 域名变化，也重新导入 VMess 链接。'
 )
 
+# ---- REALITY target site checks -------------------------------------------------
+# The probes are separate functions so tests can replace the network calls.
+reality_probe_tls() {
+  local -a groups=()
+  # OpenSSL 3.5+ can offer X25519MLKEM768 like current browsers; older builds test X25519 only.
+  if openssl list -kem-algorithms 2>/dev/null | grep -i X25519MLKEM768 >/dev/null; then
+    groups=(-groups X25519MLKEM768:X25519)
+  fi
+  timeout 12 openssl s_client -connect "$1:443" -servername "$1" -verify_hostname "$1" \
+    -alpn h2 "${groups[@]}" </dev/null 2>&1 | tr -d '\r\000' || true
+}
+reality_probe_http() {
+  curl -sS -o /dev/null --max-time 12 -w '%{remote_ip}|%{time_connect}|%{http_code}|%{redirect_url}\n' \
+    "https://$1/" 2>/dev/null || true
+}
+reality_target_normalize() {
+  local d=${1#*://}
+  d=${d%%[/:?#]*}
+  printf '%s' "${d,,}"
+}
+reality_target_header() {
+  printf '%-30s %-39s %7s %-7s %-4s %-15s %-9s %-4s %s\n' DOMAIN IP CONN_MS TLS ALPN GROUP CERT HTTP 结论
+}
+# Print one row for $1; succeed only when the site can serve as a REALITY target:
+# TLS 1.3, h2, a certificate valid for the name, and a homepage that stays on it.
+reality_target_check() {
+  local d=$1 s re tls=- alpn=- group=- vcode='' cert ip='' tconn='' code='' redirect='' ms rhost verdict=可用
+  local -a why=()
+  s=$(reality_probe_tls "$d")
+  re='New, (TLSv1\.[0-9])'; if [[ $s =~ $re ]]; then tls=${BASH_REMATCH[1]}; fi
+  re='ALPN protocol: ([^[:space:]]+)'; if [[ $s =~ $re ]]; then alpn=${BASH_REMATCH[1]}; fi
+  re='Negotiated TLS1\.3 group: ([^[:space:]]+)'
+  if [[ $s =~ $re ]]; then
+    group=${BASH_REMATCH[1]}
+  else
+    re='Server Temp Key: ([^,[:space:]]+)'; if [[ $s =~ $re ]]; then group=${BASH_REMATCH[1]}; fi
+  fi
+  [[ $group != '<NULL>' ]] || group=-
+  re='Verify return code: ([0-9]+)'; if [[ $s =~ $re ]]; then vcode=${BASH_REMATCH[1]}; fi
+  # s_client prints "Verify return code: 0" even when the handshake never completed.
+  if [[ $tls == - ]]; then cert=-; elif [[ $vcode == 0 ]]; then cert=ok; else cert="bad(${vcode:-?})"; fi
+  IFS='|' read -r ip tconn code redirect <<<"$(reality_probe_http "$d")" || true
+  ms=$(awk -v t="${tconn:-0}" 'BEGIN { printf "%.1f", t * 1000 }')
+  if [[ $tls == - ]]; then
+    why+=('TLS握手失败')
+  else
+    [[ $tls == TLSv1.3 ]] || why+=('非TLS1.3')
+    [[ $alpn == h2 ]] || why+=('无h2')
+    [[ $cert == ok ]] || why+=('证书与域名不匹配或无效')
+  fi
+  case ${code:=000} in
+    2??) ;;
+    3??)
+      rhost=${redirect#*://}; rhost=${rhost%%[/:?#]*}
+      [[ -z $rhost || ${rhost,,} == "${d,,}" ]] || why+=("首页跳转到$rhost") ;;
+    *) why+=("首页HTTP$code") ;;
+  esac
+  (( ${#why[@]} == 0 )) || verdict="不合格：${why[*]}"
+  printf '%-30s %-39s %7s %-7s %-4s %-15s %-9s %-4s %s\n' "$d" "${ip:--}" "$ms" "$tls" "$alpn" "$group" "$cert" "$code" "$verdict"
+  (( ${#why[@]} == 0 ))
+}
+
+# Check candidates from this server's own network; no arguments checks the current SNI.
+do_check_reality_target() (
+  local -a targets=()
+  local d ok=0
+  for d in "$@"; do targets+=("$(reality_target_normalize "$d")"); done
+  if (( ${#targets[@]} == 0 )); then
+    need_root
+    [[ -r $APP_DIR/state ]] || die "用法: $APP check-reality-target 域名 [域名 ...]"
+    load_state
+    protocol_enabled vless || die '未安装 VLESS + REALITY；请在命令后写要检查的域名。'
+    targets=("$REALITY_SERVER_NAME")
+  fi
+  need_cmd curl; need_cmd openssl; need_cmd timeout; need_cmd awk
+  reality_target_header
+  for d in "${targets[@]}"; do
+    if ! validate_domain "$d"; then printf '%-30s %s\n' "$d" '不合格：域名格式无效'; continue; fi
+    if reality_target_check "$d"; then ok=1; fi
+  done
+  log "本机公网 IP：$(public_ip)。IP 列最好与它同网段；CONN_MS 越小越近，同机房通常只有几毫秒。"
+  (( ok == 1 )) || die '没有可用的目标站。'
+)
+
+prepare_reality_sni() {
+  python3 - "$APP_DIR" "$1" "$2" <<'PY'
+import json, pathlib, sys
+root, stage, new = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+config = json.loads((root / 'xray.json').read_text(encoding='utf-8'))
+state = {}
+for line in (root / 'state').read_text(encoding='utf-8').splitlines():
+    key, sep, value = line.partition('=')
+    if not sep or key in state:
+        sys.exit('state 格式错误或存在重复字段；未修改配置。')
+    state[key] = value
+old = state.get('REALITY_SERVER_NAME', '')
+inbounds = config.get('inbounds', [])
+guards = [n for n in inbounds if n.get('tag') == 'reality-guard']
+nodes = [n for n in inbounds if n.get('tag') == 'vless-reality']
+rules = [r for r in config.get('routing', {}).get('rules', [])
+         if r.get('inboundTag') == ['reality-guard'] and 'domain' in r]
+if len(guards) != 1 or len(nodes) != 1 or len(rules) != 1:
+    sys.exit('未找到唯一的 Lite REALITY 守门入站、VLESS 入站和路由规则；未修改配置。')
+guard = guards[0].setdefault('settings', {})
+reality = nodes[0].get('streamSettings', {}).get('realitySettings', {})
+if (not old or guard.get('address') != old or reality.get('serverNames') != [old]
+        or rules[0]['domain'] != ['full:' + old]):
+    sys.exit('xray.json 中的 SNI 与 state 不一致（可能手动改过）；拒绝覆盖，请手动维护。')
+guard['address'] = new
+reality['serverNames'] = [new]
+rules[0]['domain'] = ['full:' + new]
+state['REALITY_SERVER_NAME'] = new
+with (stage / 'next.json').open('w', encoding='utf-8', newline='\n') as output:
+    output.write(json.dumps(config, ensure_ascii=False, indent=2) + '\n')
+with (stage / 'next.state').open('w', encoding='utf-8', newline='\n') as output:
+    output.write(''.join(f'{k}={v}\n' for k, v in state.items()))
+PY
+}
+
+# Point REALITY (SNI, fallback guard and its routing rule) at another target site.
+do_set_reality_sni() (
+  need_root
+  [[ -r $APP_DIR/state ]] || die '尚未安装 Lite。'
+  load_state
+  protocol_enabled vless || die '未安装 VLESS + REALITY，无需修改 SNI。'
+  [[ -r $APP_DIR/xray.json ]] || die 'Xray 配置缺失，请先检查安装。'
+  need_cmd xray; need_cmd systemctl; need_cmd flock; need_cmd python3
+  local arg domain='' force=0 answer usage="用法: $APP set-reality-sni 域名 [--force]"
+  for arg in "$@"; do
+    case $arg in
+      --force) force=1 ;;
+      *) [[ -z $domain ]] || die "$usage"; domain=$(reality_target_normalize "$arg") ;;
+    esac
+  done
+  if [[ -z $domain && -t 0 ]]; then
+    read -r -p "新的 REALITY SNI（目标站域名）[当前 $REALITY_SERVER_NAME]: " domain || return 0
+    domain=$(reality_target_normalize "$domain")
+  fi
+  [[ -n $domain ]] || die "$usage"
+  validate_domain "$domain" || die "域名格式无效：$domain"
+  if [[ $domain == "$REALITY_SERVER_NAME" ]]; then log "SNI 已经是 $domain，无需修改。"; return 0; fi
+  exec 9>"$APP_DIR/manage.lock"
+  flock -n 9 || die '另一项维护操作仍在运行。'
+  systemctl is-active --quiet xray-lite.service || die 'Xray 未运行；请先排查现有服务。'
+  need_cmd curl; need_cmd openssl; need_cmd timeout; need_cmd awk
+  log "正在从本机检查目标站 $domain ..."
+  reality_target_header
+  if ! reality_target_check "$domain"; then
+    if (( force == 0 )) && [[ -t 0 ]]; then
+      read -r -p '该站点不满足 REALITY 目标站要求，仍要使用？[y/N]: ' answer || answer=''
+      [[ $answer == y || $answer == Y ]] || { log '已取消，未修改配置。'; return 0; }
+    elif (( force == 0 )); then
+      die '目标站检查未通过，未修改配置；确认要用请加 --force。'
+    fi
+    log '目标站检查未通过，按要求继续修改。'
+  fi
+  # Subshell-scoped variables survive function unwinding for the EXIT trap.
+  changed=0
+  backup=$(mktemp -d "$APP_DIR/backup-sni-$(date +%Y%m%d%H%M%S).XXXXXX")
+  chmod 0700 "$backup"
+  cp -p "$APP_DIR/xray.json" "$APP_DIR/state" "$backup/"
+  if [[ -f $APP_DIR/client-info.txt ]]; then cp -p "$APP_DIR/client-info.txt" "$backup/"; fi
+
+  rollback_sni() {
+    local status=$? failed=0
+    trap - EXIT INT TERM
+    if (( status != 0 && changed == 1 )); then
+      log "修改 SNI 失败，正在恢复 $backup 中的配置"
+      cp -p "$backup/xray.json" "$APP_DIR/xray.json" || failed=1
+      cp -p "$backup/state" "$APP_DIR/state" || failed=1
+      if [[ -f $backup/client-info.txt ]]; then
+        cp -p "$backup/client-info.txt" "$APP_DIR/client-info.txt" || failed=1
+      else
+        rm -f -- "$APP_DIR/client-info.txt" || failed=1
+      fi
+      systemctl restart xray-lite.service || failed=1
+      systemctl is-active --quiet xray-lite.service || failed=1
+      (( failed == 0 )) || log "自动恢复未完成，请检查备份 $backup 与 journalctl -u xray-lite。"
+      if protocol_enabled vmess; then log "Quick Tunnel 域名可能已变化；恢复后运行 $APP show 刷新链接。"; fi
+    elif (( status != 0 )) && [[ $backup == "$APP_DIR"/backup-sni-* ]]; then
+      rm -rf -- "$backup"   # nothing was changed, so this copy has no use
+    fi
+    exit "$status"
+  }
+  trap rollback_sni EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  prepare_reality_sni "$backup" "$domain"
+  xray run -test -config "$backup/next.json"
+  chown root:xray "$backup/next.json"
+  chmod 0640 "$backup/next.json"
+  chmod 0600 "$backup/next.state"
+  changed=1
+  mv -f "$backup/next.json" "$APP_DIR/xray.json"
+  mv -f "$backup/next.state" "$APP_DIR/state"
+  systemctl restart xray-lite.service
+  systemctl is-active --quiet xray-lite.service || die '修改后 Xray 未正常启动。'
+  # PartOf=xray-lite may restart the Tunnel and rotate its temporary hostname.
+  if protocol_enabled vmess && [[ $ARGO_MODE == quick ]] && ! wait_for_quick_domain; then
+    log "尚未读到 Quick Tunnel 域名；稍后运行 $APP show。"
+  fi
+  write_client_info
+  changed=0
+  trap - EXIT INT TERM
+  prune_backups backup-sni "$backup"
+  log "REALITY SNI 已从 $REALITY_SERVER_NAME 改为 $domain；端口、UUID、密钥、shortId 和路径不变。原配置备份：$backup"
+  cat "$APP_DIR/client-info.txt"
+  log '客户端需把 SNI / servername 改成新域名，或重新导入 VLESS 链接。'
+  if protocol_enabled vmess && [[ $ARGO_MODE == quick ]]; then log '如 Quick Tunnel 域名变化，也请重新导入 VMess 链接。'; fi
+)
+
 restart_selected_services() {
   local -a services=()
   if xray_enabled; then services+=(xray-lite.service); fi
@@ -1427,7 +1664,7 @@ apply_update() (
   if protocol_enabled vmess; then cp -p "$BIN_DIR/cloudflared" "$update_backup/cloudflared"; fi
   if protocol_enabled anytls; then
     cp -p "$APP_DIR/bin/sing-box" "$update_backup/sing-box"
-    cp -p "$APP_DIR/anytls.json" "$update_backup/"
+    cp -p "$APP_DIR/anytls.json" "$UNIT_DIR/anytls-lite.service" "$update_backup/"
     cp -a "$APP_DIR/tls" "$APP_DIR/acme" "$update_backup/"
   fi
   cp -p "$APP_DIR/state" "$APP_DIR/install.sh" "$update_backup/"
@@ -1443,6 +1680,10 @@ apply_update() (
       if xray_enabled; then replace_binary "$update_backup/xray" "$BIN_DIR/xray" || failed=1; fi
       if protocol_enabled vmess; then replace_binary "$update_backup/cloudflared" "$BIN_DIR/cloudflared" || failed=1; fi
       if protocol_enabled anytls; then replace_binary "$update_backup/sing-box" "$APP_DIR/bin/sing-box" || failed=1; fi
+      if [[ -f $update_backup/anytls-lite.service ]] && ! cmp -s "$update_backup/anytls-lite.service" "$UNIT_DIR/anytls-lite.service"; then
+        cp -p "$update_backup/anytls-lite.service" "$UNIT_DIR/anytls-lite.service" || failed=1
+        systemctl daemon-reload || failed=1
+      fi
       cp -p "$update_backup/install.sh" "$APP_DIR/install.sh" || failed=1
       if [[ -f $update_backup/client-info.txt ]]; then
         cp -p "$update_backup/client-info.txt" "$APP_DIR/client-info.txt" || failed=1
@@ -1470,6 +1711,12 @@ apply_update() (
   if xray_enabled; then replace_binary "$update_backup/candidate/xray" "$BIN_DIR/xray"; fi
   if protocol_enabled vmess; then replace_binary "$update_backup/candidate/cloudflared" "$BIN_DIR/cloudflared"; fi
   if protocol_enabled anytls; then replace_binary "$update_backup/candidate/sing-box" "$APP_DIR/bin/sing-box"; fi
+  # Units written by older releases lack the MPTCP opt-out; regenerate from state.
+  if protocol_enabled anytls && ! grep -qxF "$ANYTLS_NO_MPTCP" "$UNIT_DIR/anytls-lite.service"; then
+    write_anytls_unit
+    systemctl daemon-reload
+    log 'AnyTLS 服务单元已加入 GODEBUG=multipathtcp=0（关闭 MPTCP 监听）。'
+  fi
   mv -f "$update_backup/next.install.sh" "$APP_DIR/install.sh"
   restart_selected_services
   if protocol_enabled anytls; then verify_anytls_tls; fi
@@ -1531,7 +1778,8 @@ menu_run() {
 
 menu() {
   need_root
-  local choice
+  local choice value
+  local -a targets=()
   while true; do
     printf '\n=========== Speed Slayer Lite ===========\n'
     if [[ -r $APP_DIR/state ]]; then printf '状态：已安装\n'; else printf '状态：尚未安装\n'; fi
@@ -1546,6 +1794,8 @@ menu() {
 8. 为已有节点追加 AnyTLS（保留其他节点）
 9. 刷新 AnyTLS 证书（外部续期 / 自签续期）
 10. 移除 AnyTLS（保留其他节点）
+11. 修改 VLESS REALITY 的 SNI / 目标站
+12. 检查 REALITY 目标站（TLS 1.3 / h2 / 证书 / 距离）
 0. 退出
 EOF
     read -r -p '请选择: ' choice || return 0
@@ -1555,7 +1805,12 @@ EOF
         if [[ -r $APP_DIR/state ]]; then log '已安装。更新请选 4；重新选择协议需先卸载，原节点凭据会被删除。'; continue; fi
         configure_install || continue
         menu_run do_install ;;
-      2|3|4|5|6|7|8|9|10)
+      12)
+        # Works before installation too, so a custom SNI can be checked first.
+        read -r -p '要检查的域名（空格分隔；已装 VLESS 时回车检查当前 SNI）: ' value || continue
+        read -r -a targets <<<"$value"
+        menu_run do_check_reality_target "${targets[@]}" ;;
+      2|3|4|5|6|7|8|9|10|11)
         if [[ ! -r $APP_DIR/state ]]; then log '请先选择 1 创建节点。'; continue; fi
         case $choice in
           2) menu_run do_show ;;
@@ -1567,6 +1822,9 @@ EOF
           8) menu_run do_add_anytls ;;
           9) menu_run do_refresh_anytls_cert ;;
           10) menu_run do_remove_anytls ;;
+          11)
+            read -r -p '新的 REALITY SNI（目标站域名）: ' value || continue
+            menu_run do_set_reality_sni ${value:+"$value"} ;;
         esac ;;
       *) log '请输入菜单中的编号。' ;;
     esac
@@ -1589,8 +1847,10 @@ main() {
     refresh-anytls-cert) do_refresh_anytls_cert ;;
     remove-anytls) do_remove_anytls "${2:-}" ;;
     export-anytls-client) do_export_anytls_client ;;
+    set-reality-sni) shift; do_set_reality_sni "$@" ;;
+    check-reality-target) shift; do_check_reality_target "$@" ;;
     uninstall) do_uninstall "${2:-}" ;;
-    *) die "用法: $0 {menu|install|show|status|update|repair-argo|migrate-xhttp|add-anytls|refresh-anytls-cert|remove-anytls [--yes]|export-anytls-client|uninstall [--yes]}" ;;
+    *) die "用法: $0 {menu|install|show|status|update|repair-argo|migrate-xhttp|add-anytls|refresh-anytls-cert|remove-anytls [--yes]|export-anytls-client|set-reality-sni 域名 [--force]|check-reality-target [域名 ...]|uninstall [--yes]}" ;;
   esac
 }
 

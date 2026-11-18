@@ -528,6 +528,14 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 
 ## 修改记录（溯源）
 
+### 2026-11-18 — Lite review 版：Xray 26.11.9、AnyTLS 关闭 MPTCP、REALITY SNI 管理与 mihomo 片段
+
+- **目的**：AnyTLS 端口再次被封，用户改用 VLESS + XHTTP + REALITY，需要换 SNI、检查目标站，并得到可用的 mihomo 配置。排查中发现 Lite 固定的 Xray `26.10.21` 早于 `26.10.31` 的 MPTCP 紧急安全更新：Linux 内核 IPv4 MPTCP 监听可被远程拿到 root，而 Go 1.24+ 默认开启 MPTCP。sing-box `1.14.4`（Go 1.25）的 AnyTLS 监听同样开着 MPTCP。
+- **改动**（只改 review 文件，原 `install.sh` 未动）：Xray 升级到 `26.11.9`，amd64 SHA-256 为 `b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82`，arm64 为 `64ed6858982a7f5eb85d88b811089063bd4f17561f4c8f44e0f1dc8e6f6430be`，与官方 `.dgst`、GitHub 摘要三方一致。AnyTLS 单元加入 `GODEBUG=multipathtcp=0`，`update` 会给旧单元补上这一行，失败时恢复。新增 `set-reality-sni` / 菜单 11：只改 3 个 SNI 字段，先检查目标站，失败回滚。新增 `check-reality-target` / 菜单 12：检查 TLS 1.3、h2、证书和首页跳转。`show` 输出带 `support-x25519mlkem768: true` 的 mihomo 片段。服务端刻意不设 `minClientVer`，因为 mihomo 和 sing-box 上报的版本都是 1.8.2。详细说明和用法见 `speed-slayer-lite/README-review.md`。
+- **涉及文件**：`speed-slayer-lite/install-review.sh`、`test-review-cases.sh`、`README-review.md`；本 README 与 Lite README 只追加了修改记录。
+- **验证**：3 个 Bash 文件 `bash -n` 通过。`test-review.sh` 共 84 项通过（XHTTP 13、管理 23、AnyTLS 37、review 11；2 项真实 sing-box 测试因未设置环境变量跳过）。新增的 4 组用例在改动前的版本上全部失败、改动后全部通过。真实 Windows Xray `26.11.9` 校验了安装配置和改 SNI 后的配置，并跑通 XHTTP 13 项。真实站点检查结果符合预期。端到端回环测试（真实 Xray `26.11.9` + mihomo `v1.19.34`，均使用 Lite 生成的配置）：带开关时连通；去掉 `support-x25519mlkem768`，或服务端设 `minClientVer 1.8.3` 时，都报 `REALITY authentication failed`；设 `1.8.2` 时连通。
+- **未验证与边界**：没有在 Linux VPS 上运行新命令或 `update`；旧版 OpenSSL 的输出分支只用样本数据测过；`GODEBUG` 关闭 MPTCP 的实际效果没有在 Linux 上确认；arm64 Xray 只核对了摘要。**关闭 MPTCP 只是减少暴露面，不能修复内核漏洞，仍需升级内核。** 2026-11-05 的 review 修复版也只记录在 `README-review.md`，正式采纳替换 `install.sh` 时，需要补记到这里并改回 `SCRIPT_URL`。
+
 ### 2026-11-05 — AnyTLS 自签 IP 直连与公钥固定（v2.3.0）
 
 - **目的**：用户需要在 TCP 80 已被网站占用、或没有域名的服务器上创建 AnyTLS；新增证书方式 `3` / `ANYTLS_CERT_MODE=selfsigned`，跳过域名、SNI 和邮箱，不占用或检查 80，保留原 ACME 与已有证书模式。

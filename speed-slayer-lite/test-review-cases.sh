@@ -54,6 +54,7 @@ xray() {
   case $1 in
     uuid) python3 -c 'import uuid;print(uuid.uuid4())' ;;
     x25519) printf 'PrivateKey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nPassword: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' ;;
+    run) [[ ! -f $TEST_ROOT/fail-xray ]] ;;
   esac
 }
 systemctl() {
@@ -306,4 +307,193 @@ PROTOCOLS=anytls ANYTLS_CERT_MODE=selfsigned ANYTLS_ADDRESS='' ANYTLS_PORT=18443
 [[ ! -s $TEST_ROOT/download.log && ! -e $APP_DIR/state ]] || fail 'IP detection failure must stop before downloads'
 rm "$TEST_ROOT/fail-ip"
 pass 'self-signed IP detection failure stops a fresh install before any download'
+
+# Offline stand-ins for the REALITY target probes (s_client / curl output per domain).
+mkdir -p "$TEST_ROOT/probe"
+reality_probe_tls() {
+  cat "$TEST_ROOT/probe/$1.tls" 2>/dev/null ||
+    printf '%s\n' 'CONNECTED(00000003)' 'no peer certificate available' 'Server Temp Key: <NULL>' \
+      'New, (NONE), Cipher is (NONE)' 'Verify return code: 0 (ok)'
+}
+reality_probe_http() { cat "$TEST_ROOT/probe/$1.http" 2>/dev/null || printf '|0.000000|000|\n'; }
+probe() {
+  local domain=$1 style=$2
+  case $style in
+    ok35) printf '%s\n' 'CONNECTED(00000003)' '---' 'New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384' \
+            'Protocol: TLSv1.3' 'ALPN protocol: h2' 'Verify return code: 0 (ok)' 'Negotiated TLS1.3 group: X25519MLKEM768' ;;
+    ok111) printf '%s\n' 'CONNECTED(00000003)' 'Server Temp Key: X25519, 253 bits' '---' \
+            'New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384' 'Server public key is 256 bit' 'ALPN protocol: h2' \
+            'Early data was not sent' 'Verify return code: 0 (ok)' ;;
+    tls12) printf '%s\n' 'CONNECTED(00000003)' 'Server Temp Key: X25519, 253 bits' \
+            'New, TLSv1.2, Cipher is ECDHE-RSA-AES128-GCM-SHA256' 'No ALPN negotiated' 'Verify return code: 0 (ok)' ;;
+    mismatch) printf '%s\n' 'CONNECTED(00000003)' 'New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256' \
+            'ALPN protocol: h2' 'Verify return code: 62 (hostname mismatch)' 'Negotiated TLS1.3 group: X25519' ;;
+  esac >"$TEST_ROOT/probe/$domain.tls"
+  printf '%s\n' "$3" >"$TEST_ROOT/probe/$domain.http"
+}
+probe speedtest.wobcom.de ok35 '198.51.100.7|0.004213|200|'
+probe learn.microsoft.com ok35 '198.51.100.8|0.001500|302|https://learn.microsoft.com/en-us/'
+
+# 8. Xray is pinned at or above 26.10.31 (MPTCP listeners off) with verified hashes, and
+# AnyTLS sing-box gets the same opt-out: new units carry it, updates add it to older units.
+[[ $(printf '%s\n' 26.10.31 "$XRAY_VERSION" | sort -V | head -n1) == 26.10.31 ]] || fail "Xray $XRAY_VERSION predates the MPTCP fix"
+for arch in x86_64 aarch64; do
+  uname() { case $1 in -m) echo "$arch";; -s) echo Linux;; -r) echo '6.1-test';; esac; }
+  detect_arch >/dev/null
+  case $arch in
+    x86_64) [[ $XRAY_SHA == b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82 ]] ;;
+    aarch64) [[ $XRAY_SHA == 64ed6858982a7f5eb85d88b811089063bd4f17561f4c8f44e0f1dc8e6f6430be ]] ;;
+  esac || fail "Xray $arch hash differs from the published 26.11.9 digest"
+done
+uname() { case $1 in -m) echo x86_64;; -s) echo Linux;; -r) echo '6.1-test';; esac; }
+no_mptcp='Environment=GODEBUG=multipathtcp=0'
+fixture anytls
+grep -qxF "$no_mptcp" "$UNIT_DIR/anytls-lite.service" || fail 'new AnyTLS unit leaves MPTCP on'
+sed -i "/^${no_mptcp}\$/d" "$UNIT_DIR/anytls-lite.service"
+cp -p "$UNIT_DIR/anytls-lite.service" "$TEST_ROOT/old-unit"
+rm -f "$TEST_ROOT/services.log"
+touch "$TEST_ROOT/fail-start"
+expect_failure apply_update
+cmp "$UNIT_DIR/anytls-lite.service" "$TEST_ROOT/old-unit" || fail 'failed update did not restore the AnyTLS unit'
+[[ $(grep -cx 'daemon-reload' "$TEST_ROOT/services.log") == 2 ]] || fail 'unit rewrite/restore must reload systemd'
+rm -f "$TEST_ROOT/services.log"
+apply_update >"$TEST_ROOT/operation.log" 2>&1
+grep -qxF "$no_mptcp" "$UNIT_DIR/anytls-lite.service" || fail 'update did not add the MPTCP opt-out'
+diff <(grep -vxF "$no_mptcp" "$UNIT_DIR/anytls-lite.service") "$TEST_ROOT/old-unit" >/dev/null || fail 'update changed other unit lines'
+grep -qx 'daemon-reload' "$TEST_ROOT/services.log" || fail 'rewritten unit not reloaded'
+rm -f "$TEST_ROOT/services.log"
+apply_update >"$TEST_ROOT/operation.log" 2>&1
+! grep -qx 'daemon-reload' "$TEST_ROOT/services.log" || fail 'up-to-date unit rewritten again'
+pass 'Xray >= 26.10.31 with published hashes; AnyTLS unit disables MPTCP, update adds it and restores on failure'
+
+# 9. set-reality-sni changes only the three SNI fields, checks the target first and rolls back.
+fixture vmess,ss2022,vless,anytls
+expect_failure do_set_reality_sni 'not a domain'
+assert_saved
+expect_failure do_set_reality_sni untested.example.test
+grep -q -- '--force' "$TEST_ROOT/operation.log" || fail 'failed target check must mention --force'
+assert_saved
+touch "$TEST_ROOT/locked"
+expect_failure do_set_reality_sni speedtest.wobcom.de
+rm "$TEST_ROOT/locked"
+assert_saved
+touch "$TEST_ROOT/fail-xray"
+expect_failure do_set_reality_sni speedtest.wobcom.de
+rm "$TEST_ROOT/fail-xray"
+assert_saved
+[[ $(count_dirs "$APP_DIR"/backup-sni-*) == 0 ]] || fail 'unchanged failure left a backup'
+rm -f "$TEST_ROOT/services.log"
+touch "$TEST_ROOT/fail-start"
+expect_failure do_set_reality_sni speedtest.wobcom.de
+assert_saved
+[[ $(grep -cx 'restart xray-lite.service' "$TEST_ROOT/services.log") == 2 ]] || fail 'failed restart was not rolled back and restarted'
+rm -f "$TEST_ROOT/services.log"
+do_set_reality_sni 'https://Speedtest.Wobcom.de/some/path' >"$TEST_ROOT/operation.log" 2>&1
+python3 - "$APP_DIR" "$TEST_ROOT/golden" <<'PY'
+import json, pathlib, sys
+p, g = map(pathlib.Path, sys.argv[1:])
+read = lambda f: dict(l.split('=', 1) for l in f.read_text(encoding='utf-8').splitlines())
+now, old = read(p/'state'), read(g/'state')
+new = 'speedtest.wobcom.de'
+assert now.pop('REALITY_SERVER_NAME') == new and old.pop('REALITY_SERVER_NAME') == 'learn.microsoft.com'
+assert now == old, 'other state fields changed'
+c, o = (json.loads(f.read_text(encoding='utf-8')) for f in (p/'xray.json', g/'xray.json'))
+for n in o['inbounds']:
+    if n['tag'] == 'reality-guard': n['settings']['address'] = new
+    if n['tag'] == 'vless-reality': n['streamSettings']['realitySettings']['serverNames'] = [new]
+for r in o['routing']['rules']:
+    if 'domain' in r: r['domain'] = ['full:' + new]
+assert c == o, 'xray.json changed beyond the three SNI fields'
+info, before = ((d/'client-info.txt').read_text(encoding='utf-8').splitlines() for d in (p, g))
+keep = lambda lines: [l for l in lines if l.startswith(('vmess://', 'ss://', 'anytls://'))]
+assert keep(info) == keep(before) and len(keep(info)) == 3, 'other links changed'
+assert f'sni={new}&' in next(l for l in info if l.startswith('vless://'))
+assert f'  servername: "{new}"' in info
+PY
+cmp "$APP_DIR/anytls.json" "$TEST_ROOT/golden/anytls.json" || fail 'SNI change touched AnyTLS'
+[[ $(cat "$TEST_ROOT/services.log") == $'is-active --quiet xray-lite.service\nrestart xray-lite.service\nis-active --quiet xray-lite.service' ]] ||
+  fail "SNI change should restart only Xray: $(tr '\n' ';' <"$TEST_ROOT/services.log")"
+do_set_reality_sni speedtest.wobcom.de >"$TEST_ROOT/operation.log" 2>&1
+grep -q '无需修改' "$TEST_ROOT/operation.log" || fail 'same SNI should be a no-op'
+do_set_reality_sni untested.example.test --force >"$TEST_ROOT/operation.log" 2>&1
+grep -qx 'REALITY_SERVER_NAME=untested.example.test' "$APP_DIR/state" || fail '--force must accept a failing target'
+for name in learn.microsoft.com speedtest.wobcom.de learn.microsoft.com; do do_set_reality_sni "$name" >"$TEST_ROOT/operation.log" 2>&1; done
+[[ $(count_dirs "$APP_DIR"/backup-sni-*) == 3 ]] || fail 'SNI backups not pruned to 3'
+menu >"$TEST_ROOT/menu.log" 2>&1 <<< $'11\nspeedtest.wobcom.de\n0'
+trap cleanup EXIT
+grep -qx 'REALITY_SERVER_NAME=speedtest.wobcom.de' "$APP_DIR/state" || fail 'menu 11 did not change the SNI'
+python3 - "$APP_DIR/xray.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); c = json.loads(p.read_text(encoding='utf-8'))
+next(n for n in c['inbounds'] if n['tag'] == 'vless-reality')['streamSettings']['realitySettings']['serverNames'].append('extra.example.test')
+p.write_text(json.dumps(c, indent=2) + '\n', encoding='utf-8')
+PY
+cp -p "$APP_DIR/xray.json" "$APP_DIR/state" "$TEST_ROOT/golden/"
+expect_failure do_set_reality_sni learn.microsoft.com
+grep -q '手动改过' "$TEST_ROOT/operation.log" || fail 'hand-edited serverNames must be refused'
+cmp "$APP_DIR/xray.json" "$TEST_ROOT/golden/xray.json" && cmp "$APP_DIR/state" "$TEST_ROOT/golden/state" || fail 'refusal changed files'
+fixture anytls
+expect_failure do_set_reality_sni speedtest.wobcom.de
+grep -q '未安装 VLESS' "$TEST_ROOT/operation.log" || fail 'AnyTLS-only install must be refused'
+pass 'set-reality-sni: validation/target check/lock/xray-test/restart failures restore; success edits only SNI fields'
+
+# 10. check-reality-target judges TLS 1.3, h2, certificate and homepage redirects.
+probe good.example.test ok35 '198.51.100.9|0.002100|200|'
+probe old.example.test ok111 '198.51.100.10|0.003000|302|https://old.example.test/en/'
+probe hop.example.test ok35 '198.51.100.11|0.002000|301|https://www.hop.example.test/'
+probe tls12.example.test tls12 '198.51.100.12|0.002000|200|'
+probe wrong.example.test mismatch '198.51.100.13|0.002000|000|'
+probe 404.example.test ok35 '198.51.100.14|0.002000|404|'
+do_check_reality_target good.example.test https://Old.Example.Test/x hop.example.test tls12.example.test \
+  wrong.example.test 404.example.test down.example.test 'not a domain' >"$TEST_ROOT/check.log" 2>&1
+row() { grep -E "^$1 " "$TEST_ROOT/check.log" || fail "no row for $1"; }
+[[ $(row 'good\.example\.test') =~ 198\.51\.100\.9\ +2\.1\ TLSv1\.3\ h2\ +X25519MLKEM768\ +ok\ +200\ +可用$ ]] || fail 'good target row'
+[[ $(row 'old\.example\.test') =~ \ X25519\ .*\ 302\ +可用$ ]] || fail 'OpenSSL 1.1.1 output / same-host redirect'
+[[ $(row 'hop\.example\.test') == *'首页跳转到www.hop.example.test' ]] || fail 'cross-host redirect accepted'
+[[ $(row 'tls12\.example\.test') == *'非TLS1.3 无h2' ]] || fail 'TLS 1.2 accepted'
+[[ $(row 'wrong\.example\.test') =~ bad\(62\).*证书与域名不匹配或无效 ]] || fail 'hostname mismatch accepted'
+[[ $(row '404\.example\.test') == *'首页HTTP404' ]] || fail '404 homepage accepted'
+[[ $(row 'down\.example\.test') =~ ^down\.example\.test\ +-\ .*\ -\ +000\ +不合格：TLS握手失败\ 首页HTTP000$ ]] || fail 'failed handshake must not count as a valid certificate'
+grep -q '^not a domain .*域名格式无效' "$TEST_ROOT/check.log" || fail 'invalid name not reported'
+grep -q '本机公网 IP：203.0.113.15' "$TEST_ROOT/check.log" || fail 'server IP hint missing'
+expect_failure do_check_reality_target hop.example.test down.example.test
+grep -q '没有可用的目标站' "$TEST_ROOT/operation.log" || fail 'no usable target must fail'
+fixture vless
+do_check_reality_target >"$TEST_ROOT/check.log" 2>&1
+row 'learn\.microsoft\.com' >/dev/null
+rm -rf -- "$APP_DIR"
+menu >"$TEST_ROOT/menu.log" 2>&1 <<< $'12\ngood.example.test hop.example.test\n0'
+trap cleanup EXIT
+grep -q '^good\.example\.test .*可用$' "$TEST_ROOT/menu.log" && grep -q '^hop\.example\.test .*不合格' "$TEST_ROOT/menu.log" || fail 'menu 12 before install'
+pass 'check-reality-target: verdicts for TLS/h2/cert/redirect/404/handshake failure, current SNI and menu 12'
+
+# 11. show prints a mihomo block with support-x25519mlkem768 for XHTTP and legacy TCP nodes.
+fixture vless
+mihomo_check() {
+  python3 - "$APP_DIR" "$1" "$2" <<'PY'
+import pathlib, sys
+p, transport, host = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+s = dict(l.split('=', 1) for l in (p/'state').read_text(encoding='utf-8').splitlines())
+info = (p/'client-info.txt').read_text(encoding='utf-8')
+block = info.split('mihomo（Clash Meta）配置片段', 1)[1].split('\n\n', 1)[0].splitlines()[1:]
+want = ['- name: ' + ('vless-xhttp-reality' if transport == 'xhttp' else 'vless-reality'), '  type: vless',
+        f'  server: "{host}"', f"  port: {s['REALITY_PORT']}", f"  uuid: \"{s['VLESS_UUID']}\""]
+want += (['  network: xhttp', '  xhttp-opts:', f"    path: \"{s['XHTTP_PATH']}\""] if transport == 'xhttp'
+         else ['  network: tcp', '  flow: xtls-rprx-vision'])
+want += ['  tls: true', '  udp: true', f"  servername: \"{s['REALITY_SERVER_NAME']}\"", '  client-fingerprint: chrome',
+         '  reality-opts:', f"    public-key: \"{s['REALITY_PUBLIC']}\"", f"    short-id: \"{s['REALITY_SHORT_ID']}\"",
+         '    support-x25519mlkem768: true']
+assert block == want, '\n'.join(block)
+PY
+}
+mihomo_check xhttp 203.0.113.15
+public_ip() { echo 2001:db8::15; }
+write_client_info
+grep -q '^vless://[^@]*@\[2001:db8::15\]:' "$APP_DIR/client-info.txt" || fail 'IPv6 link must keep brackets'
+mihomo_check xhttp 2001:db8::15
+public_ip() { [[ ! -f $TEST_ROOT/fail-info ]] || return 1; echo 203.0.113.15; }
+sed -i 's/^VLESS_TRANSPORT=.*/VLESS_TRANSPORT=tcp/' "$APP_DIR/state"
+write_client_info
+mihomo_check tcp 203.0.113.15
+pass 'show: mihomo block (quoted values, IPv6 without brackets, XHTTP/TCP) always sets support-x25519mlkem768'
 printf 'Review fixes: %s checks passed; package manager/systemd/downloads mocked.\n' "$passed"
